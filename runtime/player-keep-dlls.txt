@@ -1,0 +1,192 @@
+# The Windows DLLs the player's Wine keeps when the whitelist is enforced.
+#
+# Off by default. `make runtime PLAYER_DLL_WHITELIST=1` turns it on, and then
+# every *.dll under Wine's i386-windows and x86_64-windows trees, and in the
+# prefix template's system32 and syswow64, that is named neither here nor in
+# runtime/loaddll/*.txt is removed. Executables, drivers (.drv, .sys), codecs
+# (.acm) and control panels are never touched: wineboot, services, winedevice
+# and explorer are the prefix's skeleton, and all of them together are small.
+#
+# It is off because a list is only as good as the games that were run to make
+# it, and dropping a DLL costs whichever game needed it without saying so. The
+# way to grow it is to play a game with WINEDEBUG=+loaddll and hand the log to
+# runtime/loaddll-whitelist.sh, which writes runtime/loaddll/<name>.txt. The
+# conservative default - runtime/player-prune.txt - removes only tools and
+# never a DLL.
+#
+# One name per line, a shell glob matched case-insensitively against the
+# file's basename.
+# This file is the floor: what Wine itself needs to start a process, draw a
+# window and make a sound, and what the era's games load for graphics, audio,
+# input, video and networking, in both architectures.
+
+# the process
+ntdll.dll
+kernel32.dll
+kernelbase.dll
+wow64.dll
+wow64win.dll
+wow64cpu.dll
+win32u.dll
+advapi32.dll
+sechost.dll
+msvcrt.dll
+ucrtbase.dll
+rpcrt4.dll
+combase.dll
+ole32.dll
+oleaut32.dll
+olepro32.dll
+shell32.dll
+shlwapi.dll
+shcore.dll
+user32.dll
+gdi32.dll
+imm32.dll
+usp10.dll
+comctl32.dll
+comdlg32.dll
+version.dll
+setupapi.dll
+cfgmgr32.dll
+cryptbase.dll
+crypt32.dll
+bcrypt.dll
+rsaenh.dll
+wintrust.dll
+imagehlp.dll
+dbghelp.dll
+psapi.dll
+userenv.dll
+uxtheme.dll
+dwmapi.dll
+mpr.dll
+netapi32.dll
+secur32.dll
+sspicli.dll
+iertutil.dll
+urlmon.dll
+wininet.dll
+propsys.dll
+msi.dll
+msvcp60.dll
+msvcirt.dll
+msvcp140.dll
+vcruntime140.dll
+vcruntime140_1.dll
+concrt140.dll
+msvcr70.dll
+msvcr71.dll
+msvcr80.dll
+msvcr90.dll
+msvcr100.dll
+msvcr110.dll
+msvcr120.dll
+msvcp70.dll
+msvcp71.dll
+msvcp80.dll
+msvcp90.dll
+msvcp100.dll
+msvcp110.dll
+msvcp120.dll
+mfc42.dll
+mfc42u.dll
+api-ms-win-*.dll
+ext-ms-win-*.dll
+
+# graphics
+ddraw.dll
+ddrawex.dll
+d3d8.dll
+d3d9.dll
+d3d10.dll
+d3d10_1.dll
+d3d10core.dll
+d3d11.dll
+d3d12.dll
+d3d12core.dll
+dxgi.dll
+wined3d.dll
+d3dx9_*.dll
+d3dcompiler_*.dll
+d3dxof.dll
+d3dim.dll
+d3dim700.dll
+d3drm.dll
+opengl32.dll
+glu32.dll
+vulkan-1.dll
+winevulkan.dll
+dxcore.dll
+dciman32.dll
+
+# sound and music
+winmm.dll
+mmdevapi.dll
+msacm32.dll
+dsound.dll
+dsound3d.dll
+dswave.dll
+dmusic.dll
+dmusic32.dll
+dmime.dll
+dmsynth.dll
+dmloader.dll
+dmstyle.dll
+dmband.dll
+dmcompos.dll
+dmscript.dll
+xaudio2_*.dll
+x3daudio1_*.dll
+xapofx1_*.dll
+mciavi32.dll
+mciqtz32.dll
+mcicda.dll
+mciseq.dll
+mciwave.dll
+midimap.dll
+
+# input
+dinput.dll
+dinput8.dll
+xinput1_1.dll
+xinput1_2.dll
+xinput1_3.dll
+xinput1_4.dll
+xinput9_1_0.dll
+hid.dll
+
+# video
+quartz.dll
+devenum.dll
+amstream.dll
+msvfw32.dll
+avifil32.dll
+msvidc32.dll
+iccvid.dll
+ir50_32.dll
+msrle32.dll
+winegstreamer.dll
+mfplat.dll
+mf.dll
+mfreadwrite.dll
+qcap.dll
+qedit.dll
+strmbase.dll
+wmvcore.dll
+wmasf.dll
+
+# networking and multiplayer
+ws2_32.dll
+wsock32.dll
+iphlpapi.dll
+nsi.dll
+dnsapi.dll
+winhttp.dll
+dplay.dll
+dplayx.dll
+dpnet.dll
+dpnhpast.dll
+dpnhupnp.dll
+dpwsockx.dll
+dpvoice.dll

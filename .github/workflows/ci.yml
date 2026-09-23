@@ -1,0 +1,31 @@
+# Builds the two toolchain images and runs what needs neither game media nor
+# the runtime: the unit tests, the Bundles page, the bootstrap tests, and
+# clang-tidy. The scripts in tests/integration/ need your own discs (named in a
+# gitignored tests/local.env) or build/runtime.dwarfs, and are run by hand, as
+# is make check-generic, which needs the local collection data it checks for.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build kretro-builder
+        run: docker build -t kretro-builder:latest -f runtime/Dockerfile.builder runtime/
+
+      - name: Build kretro-guibuilder
+        run: docker build -t kretro-guibuilder:latest -f runtime/Dockerfile.guibuilder runtime/
+
+      - name: make test
+        run: make test
+
+      - name: make lint
+        run: make lint

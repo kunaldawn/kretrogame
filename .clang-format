@@ -1,0 +1,30 @@
+# The style kretro's C and C++ is written in, as near as clang-format can say
+# it. Used by `make format` and `make format-check` (clang-format 21, in the
+# kretro-guibuilder image).
+#
+# ColumnLimit 0 keeps each line break where its author put it: lines run to
+# about 100 columns and wrap where the sense does, not at a fixed column, and
+# a fixed limit rewraps far more than it fixes. What clang-format cannot keep
+# is two statements on one line - `e.text("id"); e.text(id);`, or
+# `{ ok = false; continue; }` - which the code uses on purpose, so the tree
+# is not mass-formatted; format what you write.
+BasedOnStyle: Google
+ColumnLimit: 0
+IndentWidth: 2
+# `const char* p` in the C++, `const char *p` in the bootstrap's C: each file
+# keeps the side it already uses, and a new file gets the C++ one.
+DerivePointerAlignment: true
+PointerAlignment: Left
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortEnumsOnASingleLine: true
+# Comments after code are lined up by hand, when at all.
+AlignTrailingComments:
+  Kind: Leave
+SpacesBeforeTrailingComments: 1
+# Includes are grouped and ordered by hand: system, then third party, then ours.
+SortIncludes: Never
+IncludeBlocks: Preserve

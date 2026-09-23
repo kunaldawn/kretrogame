@@ -1,0 +1,177 @@
+# The bundled runtime: everything a game needs, and its own libc.
+#
+# The base is chosen for what it ships, not for compatibility with the host:
+# because we bundle glibc and never link the host's, the host's age is
+# irrelevant. Ubuntu 26.04 is the configuration v1 verified all four games
+# against, and a recent glibc is also what lets a host's NVIDIA libraries load
+# under ours (they are built against an old one; see the design, Part 2).
+#
+# One image, two runtimes. assemble-runtime cuts it into kretro's runtime,
+# which keeps the authoring tools, and the player's, which does not. Both carry
+# the same Wine, so what an author test-plays is what ships.
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Wine's own dependencies are named one by one, because Wine no longer comes
+# from a package that would pull them in. The list is what the Unix side of
+# Wine 11 links or dlopens (x86_64-unix/*.so), amd64 only: new WoW64 runs
+# 32-bit Windows code with no i386 Linux libraries at all. What is left out on
+# purpose - CUPS, SANE, gphoto2, libpcap, PC/SC, CAPI, ODBC, OpenCL, v4l,
+# Kerberos, FFmpeg 4 for winedmo - serves printers, scanners, cameras, smart
+# cards and network sniffing, none of which a 1998 game reaches for; Wine
+# carries on without each one.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils unzip \
+      libx11-6 libxext6 libxcomposite1 libxcursor1 libxfixes3 libxi6 \
+      libxinerama1 libxrandr2 libxrender1 libxxf86vm1 \
+      libfreetype6 libfontconfig1 fontconfig libgnutls30t64 libdbus-1-3 \
+      libudev1 libusb-1.0-0 libwayland-client0 libwayland-egl1 \
+      libxkbcommon0 libxkbregistry0 \
+      libasound2t64 libpulse0 \
+      libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+      gstreamer1.0-libav \
+ && apt-get install -y --no-install-recommends \
+      weston xwayland \
+      libegl1 libgles2 libvulkan1 libgl1 libgl1-mesa-dri libglx-mesa0 \
+      libgbm1 libdrm2 xkb-data \
+      mesa-vulkan-drivers \
+      libnvidia-egl-wayland1 \
+      mesa-utils vulkan-tools x11-utils \
+      libarchive-tools p7zip-full unshield innoextract cabextract \
+      flac vorbis-tools \
+      util-linux procps binutils fuse-overlayfs \
+      libsdl2-2.0-0 libxtst6 \
+      fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
+
+# Wine 11, new WoW64, from Kron4ek's Wine-Builds: upstream Wine plus the
+# staging patches, built on an old glibc so it loads under any newer one, and
+# relocatable, which WineHQ's packages are not. It unpacks to the path WineHQ's
+# winehq-staging used, so rt::find_wine and everything downstream of it are
+# unchanged. The sha256 is GitHub's own digest for the release asset; a
+# mismatch means the tag was re-cut and the pin has to be looked at by a
+# person, not followed.
+ARG WINE_VERSION=11.18
+ARG WINE_SHA256=15f312effe798838d4877a37126509618b3f98759744b37aeda0c6f55875d99a
+RUN set -eux; \
+    f="wine-${WINE_VERSION}-staging-amd64-wow64.tar.xz"; \
+    curl -fsSL -o "/tmp/$f" "https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/$f"; \
+    echo "${WINE_SHA256}  /tmp/$f" | sha256sum -c -; \
+    mkdir -p /opt/wine-staging; \
+    tar -xJf "/tmp/$f" -C /opt/wine-staging --strip-components=1; \
+    rm "/tmp/$f"; \
+    [ ! -e /opt/wine-staging/lib/wine/i386-unix ]; \
+    ls /opt/wine-staging/lib/wine/i386-windows/kernel32.dll >/dev/null
+ENV PATH=/opt/wine-staging/bin:$PATH
+
+# Two DXVKs side by side. 3.x needs Vulkan 1.4; 2.7.x is the last line that
+# runs on 1.3, which is still most of the hardware a public player lands on.
+# /opt/dxvk is kept, pointing at 2.7, because it is the one that works on every
+# Vulkan machine and nothing here yet chooses between them by Vulkan version.
+# The link is relative so it still points somewhere once the tree is mounted
+# elsewhere.
+ARG DXVK3_VERSION=3.1.1
+ARG DXVK3_SHA256=40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608
+ARG DXVK2_VERSION=2.7.1
+ARG DXVK2_SHA256=d85ce7c79f57ecd765aaa1b9e7007cb875e6fde9f6d331df799bce73d513ce87
+RUN set -eux; \
+    get() { \
+      f="dxvk-$1.tar.gz"; \
+      curl -fsSL -o "/tmp/$f" "https://github.com/doitsujin/dxvk/releases/download/v$1/$f"; \
+      echo "$2  /tmp/$f" | sha256sum -c -; \
+      mkdir -p "$3"; tar -xzf "/tmp/$f" -C "$3" --strip-components=1; rm "/tmp/$f"; \
+      ls "$3/x32/d3d9.dll" "$3/x64/d3d9.dll" >/dev/null; \
+    }; \
+    get "${DXVK3_VERSION}" "${DXVK3_SHA256}" /opt/dxvk-3; \
+    get "${DXVK2_VERSION}" "${DXVK2_SHA256}" /opt/dxvk-2; \
+    ln -s dxvk-2 /opt/dxvk; \
+    ls /opt/dxvk/x32/d3d11.dll >/dev/null
+
+# cnc-ddraw draws 2D DirectDraw through OpenGL or Direct3D 9 with proper
+# scaling, which is what most of the era's 2D games need. MIT, so it can be
+# bundled - unlike dgVoodoo2, which never is. Its Windows-side configuration
+# GUI and the zipped shader bundle are left out; the loose shaders stay.
+ARG CNCDDRAW_VERSION=7.1.0.0
+ARG CNCDDRAW_SHA256=0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908
+RUN set -eux; \
+    curl -fsSL -o /tmp/cnc-ddraw.zip \
+      "https://github.com/FunkyFr3sh/cnc-ddraw/releases/download/v${CNCDDRAW_VERSION}/cnc-ddraw.zip"; \
+    echo "${CNCDDRAW_SHA256}  /tmp/cnc-ddraw.zip" | sha256sum -c -; \
+    mkdir -p /opt/cnc-ddraw; \
+    unzip -q /tmp/cnc-ddraw.zip -d /opt/cnc-ddraw; \
+    rm -f /tmp/cnc-ddraw.zip "/opt/cnc-ddraw/cnc-ddraw config.exe" /opt/cnc-ddraw/Shaders/shader-package.zip; \
+    echo "${CNCDDRAW_VERSION}" > /opt/cnc-ddraw/VERSION; \
+    ls /opt/cnc-ddraw/ddraw.dll /opt/cnc-ddraw/ddraw.ini >/dev/null
+
+# winetricks is one shell script, and its Ubuntu package depends on Ubuntu's
+# own Wine - a whole second Wine, 10.x, 1.1 GB, whose /usr/bin/wine would sit
+# ahead of ours on every search path. So the script comes from its own release
+# instead, pinned like everything else.
+ARG WINETRICKS_VERSION=20260125
+ARG WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
+RUN set -eux; \
+    curl -fsSL -o /usr/bin/winetricks \
+      "https://raw.githubusercontent.com/Winetricks/winetricks/${WINETRICKS_VERSION}/src/winetricks"; \
+    echo "${WINETRICKS_SHA256}  /usr/bin/winetricks" | sha256sum -c -; \
+    chmod 755 /usr/bin/winetricks; \
+    ! dpkg -l wine wine64 libwine 2>/dev/null | grep -q '^ii'
+
+# The prefix every game starts from, built once here instead of on the first
+# launch of every game on every machine - which costs half a minute and needs
+# a working display.
+#
+#   WINEDLLOVERRIDES=mscoree,mshtml=   Wine would otherwise offer to install
+#                                      Mono and Gecko, which we never ship.
+#   WINEUSERNAME / USER = player       the profile directory is
+#                                      drive_c/users/player on every machine,
+#                                      so a prefix can move between them and a
+#                                      save path in the registry stays true.
+#   HOME = an empty directory          so no shell folder becomes a symlink
+#                                      into this build machine's home.
+#
+# Audio is pulse then alsa, and winebus reads controllers through SDL rather
+# than hidraw, as Proton sets it: raw HID needs /dev/hidraw permissions most
+# machines do not grant, and SDL's mappings are what make a pad a pad.
+#
+# Then everything that points outside the prefix goes. z: is the host's root,
+# com1.. and the like are host devices, and all of them are absolute links that
+# mean nothing on the machine the prefix lands on. c: is relative and stays.
+#
+# How the app uses it (the contract):
+#   first launch   copy the tree to <state>/<game-id>/prefix as real files,
+#                  recreate dosdevices/ there (z: stays absent; the discs become
+#                  their drive letters), and run Wine with WINEUSERNAME=player
+#                  and USER=player, or Wine makes a second profile for the
+#                  real user name.
+#   later launches compare <prefix>/.kretro-wine-version with this template's.
+#                  Equal: nothing to do. Different - a newer player of the same
+#                  bundle - snapshot the prefix, then `wineboot -u` it in
+#                  place. Never re-seed: games keep saves under drive_c/users.
+RUN set -eux; \
+    export WINEPREFIX=/opt/kretro/prefix-template WINEDEBUG=-all \
+           WINEDLLOVERRIDES='mscoree,mshtml=' WINEUSERNAME=player USER=player \
+           HOME=/tmp/emptyhome; \
+    mkdir -p "$HOME" /opt/kretro; \
+    wineboot -i; \
+    wine reg add 'HKCU\Software\Wine\Drivers' /v Audio /d 'pulse,alsa' /f; \
+    wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v DisableHidraw /t REG_DWORD /d 1 /f; \
+    wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v 'Enable SDL' /t REG_DWORD /d 1 /f; \
+    wineserver -w; \
+    [ -d "$WINEPREFIX/drive_c/users/player" ]; \
+    find "$WINEPREFIX" -type l -lname '/*' -print -delete; \
+    wine --version > "$WINEPREFIX/.kretro-wine-version"; \
+    rm -rf "$HOME" /tmp/.wine-*; \
+    du -sh "$WINEPREFIX"
+
+# What the pins above verified, file by file, so the finished runtime can be
+# checked against it: DXVK and cnc-ddraw ship exactly as released. Here, after
+# the prefix, so that changing it costs no rebuild of anything else.
+RUN set -eux; \
+    for d in /opt/dxvk-3 /opt/dxvk-2 /opt/cnc-ddraw; do \
+      (cd "$d" && find . -name '*.dll' | sort | xargs sha256sum > SHA256SUMS); \
+    done
+
+COPY assemble-runtime.sh /usr/local/bin/assemble-runtime
+COPY asound.conf /usr/share/kretro/alsa/asound.conf
+RUN chmod +x /usr/local/bin/assemble-runtime

@@ -1,0 +1,58 @@
+# kretrogame .gitignore
+#
+# This repository holds the generic tool only. Anything that describes or
+# contains a particular game collection stays on the machine it belongs to.
+
+# --- Build output -------------------------------------------------------------
+/build/
+
+# --- Game media ---------------------------------------------------------------
+# Disc images, archives and installers: large, and never ours to distribute.
+/iso/
+*.iso
+*.bin
+*.cue
+*.img
+*.mdf
+*.mds
+*.nrg
+*.ccd
+*.chd
+*.toast
+*.zip
+*.7z
+*.rar
+*.exe
+*.msi
+*.cab
+
+# --- What kretro produces from game media ------------------------------------
+*.kgpack
+*.run
+*.dwarfs
+*.squashfs
+
+# --- Local collection data ----------------------------------------------------
+# Game manifests, disc fingerprint lists and collection listings describe one
+# person's games. kretro reads them from these paths when present and works
+# without them.
+/games/
+/db/
+/data/
+/tests/local.env
+/tests/local/
+# DLL lists recorded from playing a particular game are named after it. Only
+# Wine's own list is part of the repository.
+/runtime/loaddll/*.txt
+!/runtime/loaddll/wine-core.txt
+
+# --- Local notes and tooling --------------------------------------------------
+/docs/superpowers/
+/.claude/
+
+# --- Editors and OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

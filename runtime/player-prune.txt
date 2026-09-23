@@ -1,0 +1,84 @@
+# What the player's runtime leaves out that kretro's keeps.
+#
+# One glob per line, relative to the runtime root. assemble-runtime removes
+# every match when it builds the player profile. Everything here is something
+# the player provably never runs: it installs nothing, reads no discs through
+# an archiver, rips no audio and edits no prefix by script. Anything a game
+# might plausibly load stays; a mistake there costs a game, a mistake here
+# costs megabytes.
+
+# The authoring tools: they read discs and archives and run installers, and a
+# player only ever runs what an author already installed.
+usr/bin/7z
+usr/bin/7za
+usr/bin/7zr
+usr/lib/7zip
+usr/lib/p7zip
+usr/bin/unshield
+usr/lib/x86_64-linux-gnu/libunshield.so*
+usr/bin/innoextract
+usr/bin/cabextract
+usr/bin/flac
+usr/bin/metaflac
+usr/bin/ogg123
+usr/bin/oggdec
+usr/bin/oggenc
+usr/bin/ogginfo
+usr/bin/vcut
+usr/bin/vorbiscomment
+usr/bin/winetricks
+usr/share/winetricks
+usr/bin/bsdcat
+usr/bin/bsdcpio
+usr/bin/bsdtar
+usr/bin/bsdunzip
+# The library under them too. Nothing the player runs links it: mke2fs and
+# systemd's shared library only dlopen it, and the player runs neither.
+usr/lib/x86_64-linux-gnu/libarchive.so*
+usr/bin/unzip
+usr/bin/unzipsfx
+usr/bin/zipinfo
+usr/bin/funzip
+usr/bin/zipgrep
+
+# binutils was there for kretro's own tooling; a player inspects no binaries.
+usr/bin/addr2line
+usr/bin/ar
+usr/bin/as
+usr/bin/c++filt
+usr/bin/elfedit
+usr/bin/gprof*
+usr/bin/ld
+usr/bin/ld.*
+usr/bin/nm
+usr/bin/objcopy
+usr/bin/objdump
+usr/bin/ranlib
+usr/bin/readelf
+usr/bin/size
+usr/bin/strings
+usr/bin/strip
+usr/bin/x86_64-linux-gnu-*
+usr/lib/x86_64-linux-gnu/libbfd-*.so
+usr/lib/x86_64-linux-gnu/libopcodes-*.so
+usr/lib/x86_64-linux-gnu/libctf*.so*
+usr/lib/x86_64-linux-gnu/libsframe.so*
+usr/lib/x86_64-linux-gnu/libgprofng.so*
+usr/lib/x86_64-linux-gnu/gprofng
+
+# Wine's developer tools: compilers, IDL and resource compilers, the build
+# helpers. They make Windows programs; they never run one.
+opt/wine-staging/bin/function_grep.pl
+opt/wine-staging/bin/widl
+opt/wine-staging/bin/winebuild
+opt/wine-staging/bin/winecpp
+opt/wine-staging/bin/winedump
+opt/wine-staging/bin/wineg++
+opt/wine-staging/bin/winegcc
+opt/wine-staging/bin/winemaker
+opt/wine-staging/bin/wmc
+opt/wine-staging/bin/wrc
+
+# The dispatch manifests and discs list only the wizard reads.
+usr/share/kretro/games
+usr/share/kretro/discs.txt

@@ -1,0 +1,25 @@
+# Where the source of everything in this runtime comes from.
+#
+# The top half is written by hand, because these pieces do not come from a
+# package manager that would remember it: each line is the exact version that
+# runtime/Dockerfile.runtime and the Makefile pin, and the URL of its source.
+# The bottom half is generated when the runtime is assembled, one line per
+# Ubuntu package in the image, from dpkg itself. A kretro release mirrors every
+# tarball named here beside itself, which is how the LGPL and GPL are honoured
+# for a file that is handed around with no network behind it.
+#
+# name        version    source
+wine          11.18      https://dl.winehq.org/wine/source/11.x/wine-11.18.tar.xz
+wine-staging  11.18      https://github.com/wine-staging/wine-staging/archive/refs/tags/v11.18.tar.gz
+wine-build    11.18      https://github.com/Kron4ek/Wine-Builds/releases/download/11.18/wine-11.18-staging-amd64-wow64.tar.xz
+                         (the binary shipped; built by https://github.com/Kron4ek/Wine-Builds/blob/master/build_wine.sh)
+dxvk          3.1.1      https://github.com/doitsujin/dxvk/archive/refs/tags/v3.1.1.tar.gz
+dxvk          2.7.1      https://github.com/doitsujin/dxvk/archive/refs/tags/v2.7.1.tar.gz
+cnc-ddraw     7.1.0.0    https://github.com/FunkyFr3sh/cnc-ddraw/archive/refs/tags/v7.1.0.0.tar.gz
+winetricks    20260125   https://github.com/Winetricks/winetricks/archive/refs/tags/20260125.tar.gz
+                         (kretro's runtime only; the player's leaves it out)
+dwarfs        0.15.7    https://github.com/mhx/dwarfs/releases/download/v0.15.7/dwarfs-0.15.7.tar.xz
+                         (dwarfs-universal statically links libfuse, zstd, xxHash, folly, fmt and
+                         others; their notices are under dwarfs/LICENSES)
+blake3        1.8.7      https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz
+dear-imgui    1.91.5     https://github.com/ocornut/imgui/archive/refs/tags/v1.91.5.tar.gz

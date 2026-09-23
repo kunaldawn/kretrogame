@@ -1,0 +1,16 @@
+# Toolchain for building kretro's GUI.
+#
+# It shares the runtime's base so the SDL headers match the SDL we ship, and it
+# is a separate image so no compiler ever ends up inside the runtime tree.
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential make pkg-config python3 \
+      libsdl2-dev libzstd-dev zlib1g-dev libx11-dev libxtst-dev \
+ && rm -rf /var/lib/apt/lists/*
+# `make format` and `make lint`. A layer of their own, so adding them left the
+# compiler above exactly as it was.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang-format clang-tidy \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src

@@ -1,0 +1,67 @@
+# clang-tidy for `make lint` (clang-tidy 21, in the kretro-guibuilder image).
+#
+# The families that find real bugs are on whole: bugprone, the clang static
+# analyzer, performance and misc. What is turned off below is off for one of
+# two reasons, and says which.
+#
+# Style, not bugs - the code does these on purpose:
+#   bugprone-easily-swappable-parameters  flags every (path, path) function
+#   bugprone-empty-catch                  a failed best-effort step (removing a
+#                                         temporary, reading an optional file)
+#                                         is ignored deliberately, with a comment
+#   misc-include-cleaner                  headers are included where used, not
+#                                         to the letter of IWYU
+#   misc-no-recursion                     the CBOR and TOML readers recurse, with
+#                                         depth limits of their own
+#   misc-non-private-member-variables-in-classes, misc-use-anonymous-namespace,
+#   misc-use-internal-linkage, misc-const-correctness
+#                                         plain structs and `static` helpers are
+#                                         the house style
+#   performance-enum-size                 enums are int-sized on purpose
+#   bugprone-branch-clone                 parallel branches that happen to do
+#                                         the same thing are kept for reading
+#   clang-analyzer-optin.performance.Padding
+#                                         members are ordered by meaning, not
+#                                         by size, in objects made once
+#   clang-analyzer-unix.Stream            warns that a stream's position is
+#                                         unknown after a short fread, in loops
+#                                         that stop on it and check ferror
+#
+# Real, but found in code a later clean-up owns; each is to be turned back on
+# once that code is fixed, so that lint keeps passing on every commit:
+#   performance-unnecessary-value-param, performance-unnecessary-copy-initialization,
+#   performance-inefficient-string-concatenation, performance-inefficient-vector-operation,
+#   bugprone-narrowing-conversions, bugprone-implicit-widening-of-multiplication-result,
+#   bugprone-return-const-ref-from-parameter
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  misc-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  readability-container-size-empty,
+  readability-redundant-string-cstr,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-empty-catch,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-use-anonymous-namespace,
+  -misc-use-internal-linkage,
+  -misc-const-correctness,
+  -performance-enum-size,
+  -bugprone-branch-clone,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-unix.Stream,
+  -performance-unnecessary-value-param,
+  -performance-unnecessary-copy-initialization,
+  -performance-inefficient-string-concatenation,
+  -performance-inefficient-vector-operation,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-return-const-ref-from-parameter
+WarningsAsErrors: '*'
+# Our headers, not third_party/'s or the system's.
+HeaderFilterRegex: 'src/(bundle|config|disc|gpu|gui|install|pack|player|rt|session|util)/'
