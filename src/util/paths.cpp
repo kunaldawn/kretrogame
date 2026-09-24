@@ -6,15 +6,12 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "env.h"
+
 namespace kg {
 namespace fs = std::filesystem;
 
 namespace {
-const char* env(const char* k) {
-  const char* v = std::getenv(k);
-  return (v && *v) ? v : nullptr;
-}
-
 // Empty for kretro's layout; the bundle id for a player's.
 std::string& bundle() {
   static std::string id;
@@ -27,16 +24,16 @@ fs::path state_dir() {
   // that recomputed this afterwards would start answering with a different
   // directory - which is how saves end up somewhere nobody looks.
   static const fs::path resolved = [] {
-    if (const char* s = env("KRETRO_STATE")) return fs::path(s);
-    if (const char* x = env("XDG_DATA_HOME")) return fs::path(x) / "kretro";
-    if (const char* h = env("HOME")) return fs::path(h) / ".local" / "share" / "kretro";
+    if (const char* s = env_nonempty("KRETRO_STATE")) return fs::path(s);
+    if (const char* x = env_nonempty("XDG_DATA_HOME")) return fs::path(x) / "kretro";
+    if (const char* h = env_nonempty("HOME")) return fs::path(h) / ".local" / "share" / "kretro";
     return fs::path("/tmp") / "kretro";
   }();
   return resolved;
 }
 
 fs::path runtime_dir() {
-  if (const char* r = env("KRETRO_RUNTIME")) return r;
+  if (const char* r = env_nonempty("KRETRO_RUNTIME")) return r;
   return {};
 }
 
@@ -47,20 +44,21 @@ fs::path prefixes_dir() { return state_dir() / "prefixes"; }
 fs::path home_dir() { return state_dir() / "home"; }
 fs::path gl_dir() { return state_dir() / "gl"; }
 fs::path cache_dir() { return state_dir() / "cache"; }
+fs::path game_pack(const std::string& id) { return games_dir() / (id + ".kgpack"); }
 
 void use_bundle_layout(const std::string& bundle_id) { bundle() = bundle_id; }
 bool bundle_layout() { return !bundle().empty(); }
 
 fs::path runtime_base_dir() {
-  if (const char* x = env("XDG_RUNTIME_DIR")) return x;
+  if (const char* x = env_nonempty("XDG_RUNTIME_DIR")) return x;
   // The same directory the bootstrap made and checked is ours; asking it
   // again here costs nothing and keeps the two from disagreeing.
   return fs::path("/tmp") / (".kretro-" + std::to_string(getuid()));
 }
 
 fs::path user_cache_dir() {
-  if (const char* c = env("XDG_CACHE_HOME")) return c;
-  if (const char* h = env("HOME")) return fs::path(h) / ".cache";
+  if (const char* c = env_nonempty("XDG_CACHE_HOME")) return c;
+  if (const char* h = env_nonempty("HOME")) return fs::path(h) / ".cache";
   return runtime_base_dir();
 }
 

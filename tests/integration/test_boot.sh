@@ -10,8 +10,7 @@
 # `make test` runs it with a noexec tmpfs at /nx, which is what the memfd
 # fallback checks need. Without one, those checks are skipped, not failed.
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 BUILD="${BUILD:-build}"
 BOOT="$ROOT/$BUILD/bootstrap"
@@ -21,13 +20,10 @@ for f in "$BOOT" "$STUBS/stub_loader" "$STUBS/stub_app" "$STUBS/b3sum" "$DWARFS"
   [ -x "$f" ] || { echo "test_boot: missing $f - run: make boot-test" >&2; exit 2; }
 done
 
-CHECKS=0; FAILS=0
+# check, has, hasnt and finish come from lib.sh. A pass is only counted - there
+# are too many to read - and a failure goes to stderr, as the unit tests' do.
 ok()  { CHECKS=$((CHECKS+1)); }
 bad() { CHECKS=$((CHECKS+1)); FAILS=$((FAILS+1)); printf '  FAIL %s\n' "$1" >&2; }
-# check LABEL COMMAND... - passes when the command succeeds
-check() { local l="$1"; shift; if "$@"; then ok; else bad "$l"; fi; }
-has()  { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
-hasnt() { ! has "$1"; }
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -310,5 +306,4 @@ else
   echo "  (no noexec /nx: skipping the noexec checks)"
 fi
 
-printf '\n%d checks, %d failed\n' "$CHECKS" "$FAILS"
-[ "$FAILS" -eq 0 ]
+finish

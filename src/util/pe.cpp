@@ -6,6 +6,8 @@
 #include <cstring>
 #include <fstream>
 
+#include "text.h"
+
 namespace kg::pe {
 namespace fs = std::filesystem;
 
@@ -62,13 +64,8 @@ bool rva_to_off(const std::vector<Section>& secs, uint32_t headers_size, const B
   return false;
 }
 
-std::string lower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-  return s;
-}
-
 std::string strip_dll(std::string s) {
-  s = lower(std::move(s));
+  s = to_lower(s);
   if (s.size() > 4 && s.compare(s.size() - 4, 4, ".dll") == 0) s.resize(s.size() - 4);
   return s;
 }
@@ -212,7 +209,7 @@ Imports parse(const uint8_t* data, size_t size) {
     for (unsigned char c : name) {
       if (c < 0x20 || c > 0x7e) return fail("an imported DLL's name is not text");
     }
-    std::string low = lower(name);
+    std::string low = to_lower(name);
     if (std::find(r.dlls.begin(), r.dlls.end(), low) == r.dlls.end()) r.dlls.push_back(low);
   }
   return r;

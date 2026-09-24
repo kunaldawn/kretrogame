@@ -18,21 +18,21 @@
 # user's library is never touched and two runs in a row both pass. It wants
 # about a gigabyte of scratch space; set TMPDIR to move that somewhere roomier.
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
-[ -f tests/local.env ] && . tests/local.env
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+load_local_env
 
 BIN="${KRETRO_BIN:-build/kretro}"
 PACKER="${KGPACK_BIN:-build/kgpack}"
 ISO_DIR="$(realpath -m "${KRETRO_ISO_DIR:-iso}")"
 read -r first_game _ <<<"${KRETRO_TEST_GAMES:-}"
 ID="${KRETRO_TEST_INSTALL_GAME:-${first_game:-}}"
-[ -n "$ID" ] || { echo "skip: no game to install - set KRETRO_TEST_GAMES in tests/local.env (see tests/README.md)"; exit 0; }
+[ -n "$ID" ] || skip "no game to install - set KRETRO_TEST_GAMES in tests/local.env (see tests/README.md)"
 MANIFEST="${KRETRO_MANIFESTS:-games}/$ID.toml"
 
-[ -d "$ISO_DIR" ] || { echo "skip: no $ISO_DIR - this one needs your own discs"; exit 0; }
-[ -x "$BIN" ] || { echo "skip: no $BIN - run: make"; exit 0; }
-[ -x "$PACKER" ] || { echo "skip: no $PACKER - run: make app"; exit 0; }
-[ -f "$MANIFEST" ] || { echo "skip: no $MANIFEST"; exit 0; }
+[ -d "$ISO_DIR" ] || skip "no $ISO_DIR - this one needs your own discs"
+[ -x "$BIN" ] || skip "no $BIN - run: make"
+[ -x "$PACKER" ] || skip "no $PACKER - run: make app"
+[ -f "$MANIFEST" ] || skip "no $MANIFEST"
 
 # Everything the pack is checked against comes out of the manifest, so what is
 # being asserted is that the pack says what the manifest said - not that it
@@ -44,21 +44,15 @@ SUBDIR="$(key subdir)"
 VERIFY="$(sed -n 's/^verify *= *\[\(.*\)\]/\1/p' "$MANIFEST" | head -n 1 |
           tr ',' '\n' | tr -d ' "' | grep .)"
 
-[ -n "$ISO" ] || { echo "skip: $MANIFEST names no iso - pick a copy or unzip game"; exit 0; }
-[ -f "$ISO_DIR/$ISO" ] || { echo "skip: $ISO is not in $ISO_DIR - nothing to install from"; exit 0; }
+[ -n "$ISO" ] || skip "$MANIFEST names no iso - pick a copy or unzip game"
+[ -f "$ISO_DIR/$ISO" ] || skip "$ISO is not in $ISO_DIR - nothing to install from"
 export KRETRO_ISO_DIR="$ISO_DIR"
 [ -n "$METHOD" ] && [ -n "$VERIFY" ] ||
-  { echo "skip: could not read method and verify out of $MANIFEST"; exit 0; }
+  skip "could not read method and verify out of $MANIFEST"
 
-FAIL=0
-ok()  { printf '  ok    %s\n' "$1"; }
-bad() { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL+1)); }
-is()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 - wanted '$3', got '$2'"; fi; }
-
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/kretro-install.XXXXXX")"
+scratch install
+WORK="$SCRATCH"
 export KRETRO_STATE="$WORK/state"
-cleanup() { rm -rf "$WORK"; }
-trap cleanup EXIT
 LOG="$WORK/install.log"
 
 # --- the install itself ----------------------------------------------------
@@ -67,13 +61,13 @@ if "$BIN" install "$ID" --headless >"$LOG" 2>&1; then
 else
   bad "$ID did not install (exit $?)"
   sed 's/^/        /' "$LOG" | tail -n 20
-  printf 'failed %d\n' "$((FAIL))"
+  finish
   exit 1
 fi
 
 PACK="$KRETRO_STATE/games/$ID.kgpack"
 [ -s "$PACK" ] && ok "the pack is where the library keeps it" \
-               || { bad "no pack at $PACK"; printf 'failed %d\n' "$FAIL"; exit 1; }
+               || { bad "no pack at $PACK"; finish; exit 1; }
 
 # A second install must refuse rather than quietly rebuild over the first.
 if "$BIN" install "$ID" --headless >"$WORK/again.log" 2>&1; then
@@ -190,5 +184,4 @@ else
      "$(cat "$WORK/meta/discs/1/.windows-serial" 2>/dev/null)" "$SERIAL"
 fi
 
-printf 'failed %d\n' "$FAIL"
-[ "$FAIL" -eq 0 ]
+finish

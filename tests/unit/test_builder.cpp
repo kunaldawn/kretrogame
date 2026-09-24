@@ -3,7 +3,7 @@
 // means, what a preview inherits, and the build the page's button runs.
 //
 // The page itself is ImGui and SDL and cannot be linked here, which is why
-// everything it decides lives in src/bundle/builder.cpp. Packs are fixtures
+// everything it decides lives in src/bundle/builder/. Packs are fixtures
 // written with write_pack; the one test that needs a real DwarFS image makes
 // it with the dwarfs tool in build/, and says so and skips when there is none.
 //
@@ -27,9 +27,9 @@
 
 #include "bundle/build.h"
 #include "bundle/builder.h"
-#include "bundle/preview.h"
+#include "bundle/gamepad.h"
+#include "bundle/builder/preview.h"
 #include "install/keys.h"
-#include "install/registry.h"
 #include "pack/kgpack.h"
 #include "player/player.h"
 #include "player/prefix.h"
@@ -38,68 +38,21 @@
 #include "util/paths.h"
 #include "util/pe.h"
 #include "util/proc.h"
+#include "wine/registry.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
 using namespace kg::bundle;
 using BKind = kg::bundle::Kind;
 
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-#define CHECK_THROWS_WITH(expr, needle)                                                     \
-  do {                                                                                      \
-    ++checks;                                                                               \
-    std::string what_;                                                                      \
-    bool threw_ = false;                                                                    \
-    try { expr; } catch (const std::exception& e_) { threw_ = true; what_ = e_.what(); }    \
-    if (!threw_ || what_.find(needle) == std::string::npos) {                               \
-      ++failures;                                                                           \
-      std::fprintf(stderr, "  FAIL %s:%d  %s: wanted a throw with '%s', got %s'%s'\n",      \
-                   __FILE__, __LINE__, #expr, needle, threw_ ? "" : "no throw ",           \
-                   what_.c_str());                                                          \
-    }                                                                                       \
-  } while (0)
-
-static void section(const char* name) { std::fprintf(stderr, "%s\n", name); }
-
-static void write_file(const fs::path& p, std::string_view content) {
-  fs::create_directories(p.parent_path());
-  std::ofstream f(p, std::ios::binary | std::ios::trunc);
-  f.write(content.data(), static_cast<std::streamsize>(content.size()));
-}
+using kgtest::section;
+using kgtest::slurp;
+using kgtest::write_file;
 
 static bool has(const std::vector<Check>& cs, const std::string& id) {
   return std::any_of(cs.begin(), cs.end(), [&](const Check& c) { return c.id == id; });
-}
-
-static std::string slurp(const fs::path& p) {
-  std::ifstream f(p, std::ios::binary);
-  std::ostringstream o;
-  o << f.rdbuf();
-  return o.str();
 }
 
 static bool has_text(const std::vector<std::string>& v, const std::string& needle) {
@@ -194,7 +147,7 @@ static fs::path make_pack(const fs::path& tmp, const fs::path& shelf, const Pack
   write_file(body, b);
   fs::path out = shelf / (s.id + ".kgpack");
   fs::create_directories(shelf);
-  write_pack(out, m, WriteOptions{kg::Kind::Game, body, false});
+  write_pack(out, m, WriteOptions{kg::PackKind::Game, body, false});
   return out;
 }
 
@@ -488,7 +441,7 @@ static void test_repack(const fs::path& tmp) {
   m.run.exe = "GAME.EXE";
   m.tree = Tree::from_directory(img / "game");
   fs::path pack = tmp / "old.kgpack";
-  write_pack(pack, m, WriteOptions{kg::Kind::Game, body, false});
+  write_pack(pack, m, WriteOptions{kg::PackKind::Game, body, false});
   const Hash old_body = Pack::open(pack).meta().body.blake3;
   CHECK(packed_before_faster_loading(read_pack_facts(pack)));
 
@@ -519,7 +472,7 @@ static void test_repack(const fs::path& tmp) {
   Meta wrong = m;
   wrong.tree = Tree::from_directory(img / "system");
   fs::path liar = tmp / "liar.kgpack";
-  write_pack(liar, wrong, WriteOptions{kg::Kind::Game, body, false});
+  write_pack(liar, wrong, WriteOptions{kg::PackKind::Game, body, false});
   const std::string before = [&] {
     std::ifstream f(liar, std::ios::binary);
     std::stringstream ss;
@@ -537,20 +490,20 @@ static void test_repack(const fs::path& tmp) {
 static void test_fragment() {
   section("a pack's registry fragment read back, and where a key goes");
   // What install writes, read back value for value.
-  std::vector<install::RegValue> in = {
-      {"Software\\Example Publisher\\EXAMPLE", "InstallPath", "sz", "C:\\Games\\EXAMPLE \"quoted\"", std::string(install::kHiveLocalMachine)},
-      {"Software\\Example Publisher\\EXAMPLE", "@", "sz", "default", std::string(install::kHiveLocalMachine)},
-      {"Software\\Example Publisher\\EXAMPLE\\Video", "Width", "dword", "00000280", std::string(install::kHiveCurrentUser)},
+  std::vector<wine::RegValue> in = {
+      {"Software\\Example Publisher\\EXAMPLE", "InstallPath", "sz", "C:\\Games\\EXAMPLE \"quoted\"", std::string(wine::kHiveLocalMachine)},
+      {"Software\\Example Publisher\\EXAMPLE", "@", "sz", "default", std::string(wine::kHiveLocalMachine)},
+      {"Software\\Example Publisher\\EXAMPLE\\Video", "Width", "dword", "00000280", std::string(wine::kHiveCurrentUser)},
   };
-  std::vector<install::RegValue> got = read_fragment(install::to_reg_fragment(in));
+  std::vector<wine::RegValue> got = wine::parse_fragment(wine::to_reg_fragment(in));
   CHECK_EQ(got.size(), size_t(3));
   bool found_quoted = false, found_dword = false, found_default = false;
-  for (const install::RegValue& v : got) {
+  for (const wine::RegValue& v : got) {
     if (v.name == "InstallPath" && v.data == "C:\\Games\\EXAMPLE \"quoted\"" && v.type == "sz" &&
-        v.hive == install::kHiveLocalMachine && v.key == "Software\\Example Publisher\\EXAMPLE") {
+        v.hive == wine::kHiveLocalMachine && v.key == "Software\\Example Publisher\\EXAMPLE") {
       found_quoted = true;
     }
-    if (v.name == "Width" && v.type == "dword" && v.data == "00000280" && v.hive == install::kHiveCurrentUser) {
+    if (v.name == "Width" && v.type == "dword" && v.data == "00000280" && v.hive == wine::kHiveCurrentUser) {
       found_dword = true;
     }
     if (v.name == "@" && v.data == "default") found_default = true;
@@ -816,7 +769,7 @@ static void test_auto_backend(const fs::path& tmp) {
   m.run.exe = "bin\\game.exe";
   m.tree = Tree::from_directory(img / "game");
   fs::path pack = tmp / "example.kgpack";
-  write_pack(pack, m, WriteOptions{kg::Kind::Game, body, false});
+  write_pack(pack, m, WriteOptions{kg::PackKind::Game, body, false});
   pe::Imports got = read_exe_imports(read_pack_facts(pack), tool, tmp / "scratch-exe");
   CHECK(got.ok);
   CHECK(got.imports("d3d8"));
@@ -981,7 +934,7 @@ static void test_build_from_draft(const fs::path& tmp) {
   fs::path base = make_base(tmp);
   unsetenv("KRETRO_PLAYER_BASE");
   const std::string tool = dwarfs_tool();
-  BuildInputs in{base, games, keys, tool, tmp / "cache", {}};
+  BuildInputs in{.self = base, .games_dir = games, .keys_file = keys, .tool = tool, .cache = tmp / "cache"};
   CHECK_THROWS_WITH(build_from_draft(d, in), "make player-base");
   in.self.clear();
   CHECK_THROWS_WITH(build_from_draft(d, in), "KRETRO_SELF");
@@ -1112,6 +1065,92 @@ static void test_build_from_draft(const fs::path& tmp) {
   in.out.clear();
 }
 
+// ---- golden bytes -------------------------------------------------------------
+//
+// The exact bytes encode_draft writes into <state>/bundles/<id>.cbor, pinned so
+// that moving the code that writes them can be shown to change nothing an
+// author has remembered. A mismatch here is a format change.
+
+static void test_golden_draft() {
+  section("golden: a remembered bundle, with every optional key and with none");
+  Draft d;
+  d.id = "example-bundle";
+  d.id_typed = true;
+  d.published = true;
+  d.title = "Example Bundle";
+  d.version = "2.1";
+  d.banner = "\x89PNG banner";
+  d.icon = "\x89PNG icon";
+  d.banner_from = "/art/banner.png";
+  d.icon_from = "/art/icon.png";
+  DraftGame one;
+  one.id = "example-game";
+  one.name = "Example Game";
+  one.year = 1999;
+  one.cover = "\x89PNG cover";
+  one.cover_from = "/art/cover.png";
+  one.backend = "wined3d-gl";
+  one.needs_gpu = true;
+  one.display = "native";
+  one.fullscreen = true;
+  one.gamepad = "a=Return\n";
+  one.extra_dlls = {GameMeta::Dll{"D3DImm.dll", "MZ dll"}};
+  one.embed_key = true;
+  one.key_path = "HKEY_LOCAL_MACHINE\\Software\\Example";
+  one.key_value = "CDKey";
+  DraftGame two;
+  two.id = "example-game-2";
+  two.name = "Example Game 2";
+  two.year = 2001;
+  two.cover = "\x89PNG cover 2";
+  two.cover_from = "/art/cover2.png";
+  two.backend = "cnc-ddraw";
+  two.needs_gpu = false;
+  two.display = "fit";
+  two.fullscreen = false;
+  two.gamepad = "start=Escape\n";
+  two.extra_dlls = {GameMeta::Dll{"ddraw.dll", "MZ one"}, GameMeta::Dll{"dxgi.dll", "MZ two"}};
+  two.embed_key = true;
+  two.key_path = "HKEY_CURRENT_USER\\Software\\Example 2";
+  two.key_value = "Serial";
+  d.games = {one, two};
+  d.rights = true;
+  d.acknowledged = {"safedisc:example-game", "no-cover:example-game-2"};
+  d.out_dir = "/out";
+  d.last_built = "/out/example-bundle-2.1.run";
+  d.last_size = 123456789;
+  d.last_built_at = "2026-01-02T03:04:05Z";
+  const std::string full =
+      "b166666f726d6174016269646e6578616d706c652d62756e646c656869645f7479706564f5697075626c6973686564f5"
+      "657469746c656e4578616d706c652042756e646c656776657273696f6e63322e316662616e6e65724b89504e47206261"
+      "6e6e65726469636f6e4989504e472069636f6e6b62616e6e65725f66726f6d6f2f6172742f62616e6e65722e706e6769"
+      "69636f6e5f66726f6d6d2f6172742f69636f6e2e706e676567616d657382ae6269646c6578616d706c652d67616d6564"
+      "6e616d656c4578616d706c652047616d6564796561721907cf65636f7665724a89504e4720636f7665726a636f766572"
+      "5f66726f6d6e2f6172742f636f7665722e706e67676261636b656e646a77696e656433642d676c696e656564735f6770"
+      "75f567646973706c6179666e61746976656a66756c6c73637265656ef56767616d6570616469613d52657475726e0a6a"
+      "65787472615f646c6c7381a2646e616d656a443344496d6d2e646c6c6464617461464d5a20646c6c69656d6265645f6b"
+      "6579f5686b65795f706174687823484b45595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c"
+      "65696b65795f76616c75656543444b6579ae6269646e6578616d706c652d67616d652d32646e616d656e4578616d706c"
+      "652047616d65203264796561721907d165636f7665724c89504e4720636f76657220326a636f7665725f66726f6d6f2f"
+      "6172742f636f766572322e706e67676261636b656e6469636e632d6464726177696e656564735f677075f46764697370"
+      "6c6179636669746a66756c6c73637265656ef46767616d657061646d73746172743d4573636170650a6a65787472615f"
+      "646c6c7382a2646e616d656964647261772e646c6c6464617461464d5a206f6e65a2646e616d6568647867692e646c6c"
+      "6464617461464d5a2074776f69656d6265645f6b6579f5686b65795f706174687824484b45595f43555252454e545f55"
+      "5345525c536f6674776172655c4578616d706c652032696b65795f76616c75656653657269616c66726967687473f56c"
+      "61636b6e6f776c6564676564827573616665646973633a6578616d706c652d67616d65776e6f2d636f7665723a657861"
+      "6d706c652d67616d652d32676f75745f646972642f6f75746a6c6173745f6275696c74781b2f6f75742f6578616d706c"
+      "652d62756e646c652d322e312e72756e696c6173745f73697a651a075bcd156d6c6173745f6275696c745f6174743230"
+      "32362d30312d30325430333a30343a30355a";
+  CHECK_EQ(kgtest::to_hex(encode_draft(d)), full);
+
+  const std::string minimal =
+      "af66666f726d617401626964606869645f7479706564f4697075626c6973686564f4657469746c65606776657273696f"
+      "6e63312e306b62616e6e65725f66726f6d606969636f6e5f66726f6d606567616d65738066726967687473f46c61636b"
+      "6e6f776c656467656480676f75745f646972606a6c6173745f6275696c7460696c6173745f73697a65006d6c6173745f"
+      "6275696c745f617460";
+  CHECK_EQ(kgtest::to_hex(encode_draft(Draft{})), minimal);
+}
+
 // ---- the contract between the builder and the player -----------------------------------
 
 // What the Bundles page writes into bundle.meta, read back by the code the
@@ -1148,7 +1187,7 @@ static void test_contract(const fs::path& tmp) {
   d.games.push_back(g);
 
   fs::path base = make_base(tmp / "contract");
-  BuildInputs in{{}, games, keys, tool, tmp / "contract-cache", base};
+  BuildInputs in{.games_dir = games, .keys_file = keys, .tool = tool, .cache = tmp / "contract-cache", .base = base};
   Built b = build_from_draft(d, in);
   player::Bundle pb = player::Bundle::open(b.path);
   const GameMeta* gm = pb.game("example");
@@ -1196,6 +1235,39 @@ static void test_contract(const fs::path& tmp) {
   if (!tool.empty()) CHECK((pb.meta.licenses == std::vector<std::string>{"dxvk", "wine"}));
 }
 
+// What the command line's bundle build and rebuild know about a draft's games:
+// each pack off the shelf and its vault key, with games[i].pack pointing into
+// packs - through a move too, which is how the facts leave the function.
+static void test_draft_facts(const fs::path& tmp) {
+  make_pack(tmp, games_dir(), {"facts-one", kCleanFragment, {}, false, false, 20000});
+  make_pack(tmp, games_dir(), {"facts-two", "", {}, false, false, 20000});
+  std::vector<install::StoredKey> keys;
+  install::put_key(keys, "facts-two", "ABCD-1234", "");
+  install::save_keys(install::keys_file(), keys);
+
+  Draft d;
+  for (const char* id : {"facts-one", "facts-missing", "facts-two"}) {
+    DraftGame g;
+    g.id = id;
+    d.games.push_back(g);
+  }
+  DraftFacts f = gather_draft_facts(d, false);
+  CHECK_EQ(f.packs.size(), 3u);
+  CHECK_EQ(f.games.size(), 3u);
+  if (f.games.size() != 3 || f.packs.size() != 3) return;
+  CHECK(f.games[0].pack == &f.packs[0]);
+  CHECK(f.games[1].pack == nullptr);
+  CHECK(f.games[2].pack == &f.packs[2]);
+  CHECK_EQ(f.packs[2].meta.id, std::string("facts-two"));
+  CHECK_EQ(f.games[0].vault_key, std::string(""));
+  CHECK_EQ(f.games[2].vault_key, std::string("ABCD-1234"));
+  CHECK(!f.games[0].imports);
+
+  DraftFacts moved = std::move(f);
+  CHECK(moved.games[0].pack == &moved.packs[0]);
+  CHECK(moved.games[2].pack == &moved.packs[2]);
+}
+
 // ---- for real ---------------------------------------------------------------------------
 
 // test_builder real <kretro> <out-dir> <game-id>... : the page's build, against
@@ -1212,7 +1284,7 @@ static int real(int argc, char** argv) {
   d.out_dir = argv[3];
   d.rights = true;
   for (int i = 4; i < argc; ++i) {
-    PackFacts f = read_pack_facts(games_dir() / (std::string(argv[i]) + ".kgpack"));
+    PackFacts f = read_pack_facts(game_pack(std::string(argv[i])));
     d.games.push_back(game_from_pack(f));
     std::fprintf(stderr, "%s: %llu bytes, %zu disc(s) carried, about %llu without\n", argv[i],
                  (unsigned long long)f.bytes, f.discs_carried, (unsigned long long)f.without_discs);
@@ -1223,7 +1295,11 @@ static int real(int argc, char** argv) {
                  im.ok ? "" : im.error.c_str());
   }
   const char* dw = std::getenv("KRETRO_DWARFS");
-  BuildInputs in{argv[2], games_dir(), install::keys_file(), dw ? dw : "build/dwarfs-universal", cache_dir(), {}};
+  BuildInputs in{.self = argv[2],
+                 .games_dir = games_dir(),
+                 .keys_file = install::keys_file(),
+                 .tool = dw ? dw : "build/dwarfs-universal",
+                 .cache = cache_dir()};
   auto t0 = std::chrono::steady_clock::now();
   Built b = build_from_draft(d, in);
   auto t1 = std::chrono::steady_clock::now();
@@ -1234,7 +1310,7 @@ static int real(int argc, char** argv) {
               b.path.c_str(), (unsigned long long)b.size, secs(t0, t1), secs(t1, t2), v.meta.games.size(),
               v.toc.entries.size());
   std::vector<PackFacts> facts;
-  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(games_dir() / (g.id + ".kgpack")));
+  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(game_pack(g.id)));
   std::vector<const PackFacts*> ptrs;
   for (const PackFacts& f : facts) ptrs.push_back(&f);
   SizeReport sr = size_report(player_base_bytes(find_player_base(argv[2])), v.meta.encode().size(), ptrs);
@@ -1278,6 +1354,9 @@ int main(int argc, char** argv) {
   fs::path tmp = fs::temp_directory_path() / "kretro-test-builder";
   fs::remove_all(tmp);
   fs::create_directories(tmp);
+  // Before anything asks where the state is: it is resolved once, and
+  // test_draft_facts reads the shelf and the vault from it.
+  setenv("KRETRO_STATE", (tmp / "state").c_str(), 1);
 
   try {
     test_slug();
@@ -1291,12 +1370,12 @@ int main(int argc, char** argv) {
     test_preview_env(tmp);
     test_build_from_draft(tmp);
     test_contract(tmp);
+    test_golden_draft();
+    test_draft_facts(tmp);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

@@ -21,6 +21,8 @@
 // a stranger's arithmetic and is checked before it is believed: that it lies
 // inside the file, that no two payloads claim the same bytes, and that the
 // table is the table its trailer hashed.
+//
+// The format is specified in docs/file-format.md.
 #pragma once
 
 #include <cstdint>
@@ -123,6 +125,9 @@ struct Toc {
   bool is_player() const { return find(Kind::Meta) != nullptr; }
   // Where an entry is in the path the table was read from.
   uint64_t at(const Entry& e) const { return base + e.off; }
+  // Where the last payload ends, relative to `base`: the table and trailer
+  // follow it. Zero for a table with no entries.
+  uint64_t payload_end() const;
 };
 
 // The table's bytes: header then records, in the order given. Throws

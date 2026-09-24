@@ -35,4 +35,7 @@ class Toml {
   std::map<std::string, Value> values_;
 };
 
+// A TOML basic string: quoted, with its backslashes and quotes escaped.
+std::string toml_string(const std::string& s);
+
 }  // namespace kg

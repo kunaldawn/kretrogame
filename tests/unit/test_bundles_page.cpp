@@ -14,20 +14,18 @@
 #include <string>
 
 #include "bundle/builder.h"
-#include "gui/bundles.h"
-#include "gui/widgets.h"
+#include "gui/bundles/bundles_page.h"
+#include "gui/texture.h"
+#include "gui/window.h"
 #include "pack/kgpack.h"
 #include "util/paths.h"
 #include "imgui.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
 
-static void write_file(const fs::path& p, const std::string& content) {
-  fs::create_directories(p.parent_path());
-  std::ofstream f(p, std::ios::binary | std::ios::trunc);
-  f << content;
-}
+using kgtest::write_file;
 
 int main() {
   fs::path tmp = fs::temp_directory_path() / "kretro-test-bundles-page";
@@ -51,7 +49,7 @@ int main() {
   m.registry.fragment = "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\F]\n\"CDKey\"=\"ABCD-1234-EFGH\"\n";
   m.tree = Tree::from_directory(tmp / "tree");
   fs::create_directories(games_dir());
-  write_pack(games_dir() / "fixture.kgpack", m, WriteOptions{Kind::Game, tmp / "body", false});
+  write_pack(games_dir() / "fixture.kgpack", m, WriteOptions{PackKind::Game, tmp / "body", false});
 
   bundle::Draft d;
   d.title = "Page smoke";
@@ -81,8 +79,7 @@ int main() {
   int frames = 0;
   {
     rt::Env env;
-    gui::Bundles page(env);
-    page.set_fonts(font, font);
+    gui::Bundles page(env, gui::Fonts{font, font});
     page.open();
     auto frame = [&] {
       ImGui::NewFrame();

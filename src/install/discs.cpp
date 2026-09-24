@@ -2,20 +2,17 @@
 
 #include <cctype>
 #include <map>
+#include <system_error>
+#include <utility>
 #include <stdexcept>
 
-#include "install.h"
+#include "collection.h"
+#include "../util/text.h"
 
 namespace fs = std::filesystem;
 
 namespace kg::install {
 namespace {
-
-std::string lower(std::string_view s) {
-  std::string o(s);
-  for (char& c : o) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return o;
-}
 
 bool all_digits(std::string_view s) {
   if (s.empty()) return false;
@@ -43,9 +40,9 @@ DiscRef parse_disc_ref(std::string_view s) {
 
 int pick_disc(const std::vector<disc::Disc>& discs, const DiscRef& ref) {
   if (!ref.label.empty()) {
-    std::string want = lower(ref.label);
+    std::string want = to_lower(ref.label);
     for (size_t i = 0; i < discs.size(); ++i) {
-      if (lower(discs[i].label) == want) return static_cast<int>(i);
+      if (to_lower(discs[i].label) == want) return static_cast<int>(i);
     }
     return -1;
   }
@@ -97,6 +94,38 @@ std::vector<disc::Disc> resolve_discs(const rt::Env& e, const std::vector<std::s
     out.push_back(it->second[static_cast<size_t>(which)]);
   }
   return out;
+}
+
+std::string disc_ref_for(const disc::Disc& d) {
+  // The form both resolvers already parse (parse_disc_ref). The archive is
+  // named without its directory because that is how a manifest names it and
+  // how find_iso looks for it; the absolute path travels beside it in
+  // Meta::Disc::source for when the name does not resolve.
+  std::string archive = d.source.filename().string();
+  if (d.label.empty()) return archive;
+  return archive + "#" + d.label;
+}
+
+Meta::Disc disc_entry(const disc::Disc& d, std::string ref, bool embedded) {
+  Meta::Disc e;
+  e.label = d.label;
+  e.serial = d.serial;
+  e.ref = std::move(ref);
+  std::error_code ec;
+  e.source = fs::absolute(d.source, ec).lexically_normal().string();
+  e.embedded = embedded;
+  return e;
+}
+
+fs::path locate_disc(const DiscRef& ref, const std::vector<DiscFingerprint>& fingerprints,
+                     size_t index) {
+  // By name first, then by what the disc is: a recipe that came from someone
+  // else names the disc as they had it filed.
+  fs::path found = find_iso(ref.archive);
+  if (found.empty() && index < fingerprints.size()) {
+    found = find_iso_by_fingerprint(fingerprints[index]);
+  }
+  return found;
 }
 
 }  // namespace kg::install

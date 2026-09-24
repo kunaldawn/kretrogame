@@ -1,8 +1,8 @@
 # clang-tidy for `make lint` (clang-tidy 21, in the kretro-guibuilder image).
 #
 # The families that find real bugs are on whole: bugprone, the clang static
-# analyzer, performance and misc. What is turned off below is off for one of
-# two reasons, and says which.
+# analyzer, performance and misc. What is turned off below is off because it
+# is style rather than a bug, and says why.
 #
 # Style, not bugs - the code does these on purpose:
 #   bugprone-easily-swappable-parameters  flags every (path, path) function
@@ -26,13 +26,6 @@
 #   clang-analyzer-unix.Stream            warns that a stream's position is
 #                                         unknown after a short fread, in loops
 #                                         that stop on it and check ferror
-#
-# Real, but found in code a later clean-up owns; each is to be turned back on
-# once that code is fixed, so that lint keeps passing on every commit:
-#   performance-unnecessary-value-param, performance-unnecessary-copy-initialization,
-#   performance-inefficient-string-concatenation, performance-inefficient-vector-operation,
-#   bugprone-narrowing-conversions, bugprone-implicit-widening-of-multiplication-result,
-#   bugprone-return-const-ref-from-parameter
 Checks: >
   -*,
   bugprone-*,
@@ -54,14 +47,10 @@ Checks: >
   -performance-enum-size,
   -bugprone-branch-clone,
   -clang-analyzer-optin.performance.Padding,
-  -clang-analyzer-unix.Stream,
-  -performance-unnecessary-value-param,
-  -performance-unnecessary-copy-initialization,
-  -performance-inefficient-string-concatenation,
-  -performance-inefficient-vector-operation,
-  -bugprone-narrowing-conversions,
-  -bugprone-implicit-widening-of-multiplication-result,
-  -bugprone-return-const-ref-from-parameter
+  -clang-analyzer-unix.Stream
 WarningsAsErrors: '*'
-# Our headers, not third_party/'s or the system's.
-HeaderFilterRegex: 'src/(bundle|config|disc|gpu|gui|install|pack|player|rt|session|util)/'
+# Our headers, not third_party/'s or the system's. Anchored, and each directory
+# named, because the tree is mounted at /src in the image: a bare 'src/' would
+# match /src/third_party/ too. It names directories before they exist so that
+# each is linted from the moment it appears.
+HeaderFilterRegex: '(^|/)src/(apps|backend|bundle|cli|config|disc|gpu|gui|install|pack|player|rt|session|util|wine)/'

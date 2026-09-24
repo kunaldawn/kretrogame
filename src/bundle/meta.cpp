@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <stdexcept>
 
-#include "../pack/kgpack.h"
 #include "../util/cbor.h"
+#include "../util/safe_names.h"
 #include "toc.h"
 
 namespace kg::bundle {
@@ -45,7 +45,7 @@ struct Fields {
     return v;
   }
 
-  std::string text(std::string_view key, bool required = false, std::string def = "") const {
+  std::string text(std::string_view key, bool required = false, const std::string& def = "") const {
     const Value* v = want(key, Value::Type::Text, "text", required);
     return v ? v->s : def;
   }
@@ -65,17 +65,13 @@ struct Fields {
   const Value* submap(std::string_view key) const { return want(key, Value::Type::Map, "a map", false); }
 };
 
-const Value& as_map(const Value& v, const std::string& where) {
+void require_map(const Value& v, const std::string& where) {
   if (!v.is_map()) bad(where + " should be a map, found " + type_name(v));
-  return v;
 }
 
-constexpr std::string_view kBackends[] = {"auto", "dxvk", "wined3d-vk", "wined3d-gl", "cnc-ddraw"};
-constexpr std::string_view kDisplays[] = {"integer", "fit", "native"};
-
 template <size_t N>
-bool one_of(std::string_view s, const std::string_view (&set)[N]) {
-  return std::find(std::begin(set), std::end(set), s) != std::end(set);
+bool one_of(std::string_view s, const std::array<std::string_view, N>& set) {
+  return std::find(set.begin(), set.end(), s) != set.end();
 }
 
 std::string game_where(size_t i, const std::string& id) {
@@ -102,8 +98,8 @@ void BundleMeta::validate() const {
     if (std::find(seen.begin(), seen.end(), g.id) != seen.end()) bad("two games are called " + g.id);
     seen.push_back(g.id);
     if (g.name.empty()) bad(where + " has no name");
-    if (!one_of(g.backend, kBackends)) bad(where + " asks for graphics backend '" + g.backend + "', which is not one");
-    if (!one_of(g.display, kDisplays)) bad(where + " asks for display mode '" + g.display + "', which is not one");
+    if (!one_of(g.backend, kBackendNames)) bad(where + " asks for graphics backend '" + g.backend + "', which is not one");
+    if (!one_of(g.display, kDisplayModes)) bad(where + " asks for display mode '" + g.display + "', which is not one");
     for (const GameMeta::Dll& d : g.extra_dlls) {
       // Written into the game's own directory by name: one plain component.
       if (!kg::id_is_safe(d.name)) bad(where + " carries a file named '" + d.name + "', which cannot be placed");
@@ -114,6 +110,23 @@ void BundleMeta::validate() const {
     }
   }
 }
+
+namespace {
+
+// A game's embedded key, when it has one. Its own function because
+// clang-tidy's optional-access analysis gives up on one as long as encode()
+// and then cannot see the check before the access.
+void encode_key(cbor::Encoder& e, const std::optional<GameMeta::Key>& key) {
+  if (!key) return;
+  e.text("key");
+  e.map(key->view.empty() ? 3 : 4);
+  e.text("value"); e.text(key->value);
+  e.text("registry_path"); e.text(key->registry_path);
+  e.text("registry_value"); e.text(key->registry_value);
+  if (!key->view.empty()) { e.text("view"); e.text(key->view); }
+}
+
+}  // namespace
 
 std::string BundleMeta::encode() const {
   cbor::Encoder e;
@@ -153,14 +166,7 @@ std::string BundleMeta::encode() const {
       e.text("name"); e.text(d.name);
       e.text("data"); e.bytes(d.data.data(), d.data.size());
     }
-    if (g.key) {
-      e.text("key");
-      e.map(g.key->view.empty() ? 3 : 4);
-      e.text("value"); e.text(g.key->value);
-      e.text("registry_path"); e.text(g.key->registry_path);
-      e.text("registry_value"); e.text(g.key->registry_value);
-      if (!g.key->view.empty()) { e.text("view"); e.text(g.key->view); }
-    }
+    encode_key(e, g.key);
   }
   return e.take();
 }
@@ -172,7 +178,8 @@ BundleMeta BundleMeta::decode(std::string_view data) {
   } catch (const std::exception& ex) {
     bad(ex.what());
   }
-  Fields top{as_map(root, "the top level"), "the bundle"};
+  require_map(root, "the top level");
+  Fields top{root, "the bundle"};
 
   BundleMeta m;
   m.format = top.uint("format", true);
@@ -201,7 +208,9 @@ BundleMeta BundleMeta::decode(std::string_view data) {
   const Value* gs = top.want("games", Value::Type::Array, "an array", true);
   for (size_t i = 0; i < gs->arr.size(); ++i) {
     std::string where = game_where(i, "");
-    Fields f{as_map(gs->arr[i], where), where};
+    const Value& gv = gs->arr[i];
+    require_map(gv, where);
+    Fields f{gv, where};
     GameMeta g;
     g.id = f.text("id", true);
     f.where = game_where(i, g.id);
@@ -218,7 +227,9 @@ BundleMeta BundleMeta::decode(std::string_view data) {
     if (const Value* ds = f.array("extra_dlls")) {
       for (size_t k = 0; k < ds->arr.size(); ++k) {
         std::string dwhere = "extra file " + std::to_string(k + 1) + " of " + f.where;
-        Fields df{as_map(ds->arr[k], dwhere), dwhere};
+        const Value& dv = ds->arr[k];
+        require_map(dv, dwhere);
+        Fields df{dv, dwhere};
         g.extra_dlls.push_back({df.text("name", true), df.want("data", Value::Type::Bytes, "bytes", true)->s});
       }
     }
@@ -232,35 +243,6 @@ BundleMeta BundleMeta::decode(std::string_view data) {
 
   m.validate();
   return m;
-}
-
-std::string format_gamepad(const std::map<std::string, std::string>& binds) {
-  std::string out;
-  for (const auto& [button, key] : binds) {
-    if (button.empty() || key.empty()) continue;
-    out += button + "=" + key + "\n";
-  }
-  return out;
-}
-
-std::map<std::string, std::string> parse_gamepad(std::string_view text) {
-  std::map<std::string, std::string> out;
-  auto trim = [](std::string_view v) {
-    size_t a = v.find_first_not_of(" \t\r\n");
-    size_t b = v.find_last_not_of(" \t\r\n");
-    return a == std::string_view::npos ? std::string() : std::string(v.substr(a, b - a + 1));
-  };
-  size_t start = 0;
-  for (size_t i = 0; i <= text.size(); ++i) {
-    if (i < text.size() && text[i] != ',' && text[i] != ';' && text[i] != '\n') continue;
-    std::string_view item = text.substr(start, i - start);
-    start = i + 1;
-    size_t eq = item.find('=');
-    if (eq == std::string_view::npos) continue;
-    std::string k = trim(item.substr(0, eq)), v = trim(item.substr(eq + 1));
-    if (!k.empty() && !v.empty()) out[k] = v;
-  }
-  return out;
 }
 
 }  // namespace kg::bundle

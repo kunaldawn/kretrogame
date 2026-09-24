@@ -51,8 +51,9 @@ struct Hasher::Impl {
   blake3_hasher h;
 };
 
-Hasher::Hasher() : impl_(new Impl) { blake3_hasher_init(&impl_->h); }
-Hasher::~Hasher() { delete impl_; }
+Hasher::Hasher() : impl_(std::make_unique<Impl>()) { blake3_hasher_init(&impl_->h); }
+// Defined here, where Impl is complete, so unique_ptr can delete it.
+Hasher::~Hasher() = default;
 
 void Hasher::update(const void* data, size_t len) {
   blake3_hasher_update(&impl_->h, data, len);
@@ -67,8 +68,6 @@ Hash Hasher::finish() const {
   blake3_hasher_finalize(&copy, out.data(), out.size());
   return out;
 }
-
-Hash hash_zero() { return Hash{}; }
 
 Hash hash_bytes(const void* data, size_t len) {
   blake3_hasher h;

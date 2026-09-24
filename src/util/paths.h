@@ -48,6 +48,9 @@ std::filesystem::path home_dir();      // <state>/home       per-game HOME
 std::filesystem::path gl_dir();        // <state>/gl         host driver links
 std::filesystem::path cache_dir();     // <state>/cache
 
+// games_dir()/<id>.kgpack: where an installed game's pack is.
+std::filesystem::path game_pack(const std::string& id);
+
 // Switches every game_*_dir below to a player's layout, keyed by `bundle_id`.
 // Called once, by the player, before anything else asks where a game lives.
 void use_bundle_layout(const std::string& bundle_id);

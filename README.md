@@ -403,11 +403,27 @@ installed files. The Bundles page shows the exact size before building.
 
 | Path | Contents |
 |---|---|
-| `boot/` | Static musl bootstrap shared by kretro and players |
-| `src/` | C++ sources: disc reading, installation, packs, bundles, sessions, GPU detection, both user interfaces |
+| `boot/` | The static musl bootstrap shared by kretro and players: `main.c` runs the start-up sequence, and `layout.c`, `tool.c`, `unpack.c`, `dirs.c`, `io.c`, `proc.c`, `userns.c`, `diag.c` and `util.c` hold one concern each, sharing only `boot.h` |
+| `src/apps/` | The `main` of each program: `kretro/`, `player/` (with its command handlers) and `kgpack/` |
+| `src/cli/` | kretro's command table and a file for each group of commands |
+| `src/util/` | Bytes, CBOR, hashing, paths, processes, TOML, text and safe names |
+| `src/config/` | `config.toml` and scaling |
+| `src/gpu/` | The GPU probe, NVIDIA matching and capabilities |
+| `src/pack/` | The kgpack format: header, metadata, tree and Merkle root, reading and writing |
+| `src/rt/` | The runtime's paths and environment |
+| `src/disc/` | Disc images, containers, ISO 9660, serials, drives and CD audio |
+| `src/backend/` | The graphics backend policy |
+| `src/wine/` | A prefix's registry fragment and system files |
+| `src/session/` | Playing a game: lock, layers, prefix, compositor, journal, saves and snapshots, one file per concern |
+| `src/install/` | Installing a game: the install engine (`build_*.cpp`), manifests, the collection, drafts, sharing and keys |
+| `src/bundle/` | The table of contents, `bundle.meta`, and building and verifying players; `builder/` holds the Bundles page's decisions without the page |
+| `src/player/` | The player's logic without a window: its file, state, settings, unpacking, prefix and command line |
+| `src/gui/` | Both windows. Shared pieces at the top; `shelf/`, `wizard/`, `bundles/` and `stage/` are kretro's, and `launcher/` is the player's |
 | `runtime/` | Dockerfiles and scripts that build the toolchain images and runtime images |
 | `scripts/` | Linker for the final executables, and repository checks |
-| `tests/` | Unit tests, integration tests and fixtures |
+| `tests/unit/` | One C++ test program per subsystem, and the shared helpers in `tests/unit/support/` |
+| `tests/integration/`, `tests/fixtures/` | Shell tests against real builds, runtimes and discs, and the stand-ins the tests build from |
+| `docs/` | Architecture, file formats, building and testing |
 | `mk/` | Makefile fragments |
 | `licenses/` | Licence texts and source list for bundled third-party components |
 | `third_party/` | Vendored BLAKE3, Dear ImGui and stb_image sources |
@@ -421,7 +437,7 @@ installed files. The Bundles page shows the exact size before building.
 | `make test` | Unit tests and bootstrap tests. Needs no games and no runtime image |
 | `make test-runtime` | Check both runtime images and start their Wine |
 | `make lint` | Run clang-tidy over `src/` |
-| `make format` | Format sources with clang-format |
+| `make format` | Format the files listed in `FORMAT_CLEAN` with clang-format |
 | `make check-generic` | Check that no tracked file refers to games in your local collection |
 | `make clean` | Remove `build/` |
 | `make help` | List all targets |
@@ -432,7 +448,17 @@ installed files. The Bundles page shows the exact size before building.
 in `tests/integration/` install real games from your own disc images, build
 players and run them on several distributions. They read their configuration
 from `tests/local.env`, which is not tracked, and skip when it is absent. See
-[tests/README.md](tests/README.md) for setup.
+[docs/testing.md](docs/testing.md) for setup.
+
+### Documentation
+
+- [docs/architecture.md](docs/architecture.md): the programs, the process
+  model, the environment contract, the module map, threads and the GUI.
+- [docs/file-format.md](docs/file-format.md): the specification of every
+  format kretrogame writes.
+- [docs/building.md](docs/building.md): the images, the make targets and
+  the development loops.
+- [docs/testing.md](docs/testing.md): the unit and integration tests.
 
 ### Environment variables for development
 

@@ -1,5 +1,6 @@
 #include "disc.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
@@ -9,6 +10,9 @@
 #include "audio.h"
 #include "cue.h"
 #include "sector.h"
+
+#include "../util/hash.h"
+#include "../util/text.h"
 
 namespace fs = std::filesystem;
 
@@ -58,8 +62,7 @@ Disc open(const rt::Env& e, const Candidate& c, const fs::path& work, bool rip_a
     // An .iso is already normalised. A .bin with no cue sheet beside it is raw
     // sectors, and its size gives the format away: 2352 divides it and 2048
     // does not.
-    std::string low = inner.filename().string();
-    for (char& ch : low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    std::string low = to_lower(inner.filename().string());
     uint64_t sz = fs::file_size(inner, ec);
     if (low.size() > 4 && low.compare(low.size() - 4, 4, ".bin") == 0 && sz % 2352ull == 0 &&
         sz % 2048ull != 0) {
@@ -119,6 +122,44 @@ Disc open(const rt::Env& e, const Candidate& c, const fs::path& work, bool rip_a
   }
 
   d.info = iso::scan(d.iso, false);
+  d.label = d.info.volume_id;
+  d.serial = volume_serial(d.info);
+  return d;
+}
+
+// A mounted CD, or a disc somebody already extracted. probe_into
+// (container.cpp) returns candidates only for disc images and
+// archives, so this is the one source kind the existing pipeline cannot see at
+// all - and it is a few dozen lines, because there is nothing to normalise.
+Disc open_directory(const fs::path& dir) {
+  Disc d;
+  d.source = dir;
+  d.iso = dir;                 // there is no image: the tree is the disc
+  d.info.path = dir;
+  d.info.volume_id = dir.filename().string();
+
+  // assemble() collapses a duplicate dump by (size, prefix hash), and a
+  // directory has neither unless it is given them. The listing - names and
+  // sizes, sorted - is decisive between two different discs and costs a stat
+  // per file, where hashing the contents of a 700 MB mount would not be
+  // something a person would sit through while adding sources.
+  std::vector<std::string> lines;
+  std::error_code ec;
+  uint64_t total = 0;
+  for (const fs::directory_entry& de : fs::recursive_directory_iterator(dir, ec)) {
+    std::error_code e2;
+    if (!de.is_regular_file(e2)) continue;
+    uint64_t sz = de.file_size(e2);
+    total += sz;
+    lines.push_back(fs::relative(de.path(), dir, e2).generic_string() + "\t" +
+                    std::to_string(sz) + "\n");
+  }
+  std::sort(lines.begin(), lines.end());
+  std::string canon;
+  for (const std::string& l : lines) canon += l;
+  d.info.size = total;
+  d.info.prefix = hash_string(canon);
+
   d.label = d.info.volume_id;
   d.serial = volume_serial(d.info);
   return d;

@@ -4,6 +4,7 @@
 // way test_pack.cpp makes them.
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,102 +14,47 @@
 #include <vector>
 
 #include "bundle/build.h"
+#include "bundle/gamepad.h"
 #include "bundle/meta.h"
 #include "bundle/toc.h"
 #include "pack/kgpack.h"
 #include "pack/tree.h"
 #include "util/cbor.h"
 #include "util/hash.h"
+#include "support/bundle_fixtures.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                       \
-  do {                                                                    \
-    ++checks;                                                             \
-    if (!(cond)) {                                                        \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                     \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                       \
-  do {                                                                       \
-    ++checks;                                                                \
-    auto va = (a);                                                           \
-    auto vb = (b);                                                           \
-    if (!(va == vb)) {                                                       \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s != %s\n", __FILE__, __LINE__, #a, #b); \
-    }                                                                        \
-  } while (0)
-
 // The failure has to be the named one: a table with overlapping entries that
 // is refused for its hash instead would be a test passing by accident.
-#define CHECK_FAILS(expr, why)                                                        \
-  do {                                                                                \
-    ++checks;                                                                         \
-    bool right = false;                                                               \
-    std::string got = "no exception";                                                 \
-    try {                                                                             \
-      expr;                                                                           \
-    } catch (const FormatError& e) {                                                  \
-      right = e.failure() == (why);                                                   \
-      got = e.what();                                                                 \
-    } catch (const std::exception& e) {                                               \
-      got = std::string("not a FormatError: ") + e.what();                            \
-    }                                                                                 \
-    if (!right) {                                                                     \
-      ++failures;                                                                     \
-      std::fprintf(stderr, "  FAIL %s:%d  %s -> %s\n", __FILE__, __LINE__, #expr, got.c_str()); \
-    }                                                                                 \
-  } while (0)
-
-// And a message a person can act on has to say what it is about.
-#define CHECK_THROWS_WITH(expr, needle)                                               \
-  do {                                                                                \
-    ++checks;                                                                         \
-    std::string got = "no exception";                                                 \
-    try {                                                                             \
-      expr;                                                                           \
-    } catch (const std::exception& e) {                                               \
-      got = e.what();                                                                 \
-    }                                                                                 \
-    if (got.find(needle) == std::string::npos) {                                      \
-      ++failures;                                                                     \
-      std::fprintf(stderr, "  FAIL %s:%d  %s -> \"%s\", wanted \"%s\"\n", __FILE__, __LINE__, #expr, \
-                   got.c_str(), needle);                                              \
-    }                                                                                 \
+#define CHECK_FAILS(expr, why)                                     \
+  do {                                                             \
+    bool right = false;                                            \
+    std::string got = "no exception";                              \
+    try {                                                          \
+      expr;                                                        \
+    } catch (const FormatError& e) {                               \
+      right = e.failure() == (why);                                \
+      got = e.what();                                              \
+    } catch (const std::exception& e) {                            \
+      got = std::string("not a FormatError: ") + e.what();         \
+    }                                                              \
+    kgtest::record(right, __FILE__, __LINE__, #expr " -> " + got); \
   } while (0)
 
 // Everything below lives in kg::bundle so that Kind is the bundle's; a pack's
-// own kind is spelled kg::Kind where one is written.
+// own kind is spelled kg::PackKind where one is written.
 namespace kg::bundle {
 
-static void section(const char* name) { std::fprintf(stderr, "%s\n", name); }
-
-static void write_file(const fs::path& p, std::string_view content) {
-  fs::create_directories(p.parent_path());
-  std::ofstream f(p, std::ios::binary | std::ios::trunc);
-  f.write(content.data(), static_cast<std::streamsize>(content.size()));
-}
-
-static std::string read_file(const fs::path& p) {
-  std::ifstream f(p, std::ios::binary);
-  return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-}
-
-static void flip(const fs::path& p, uint64_t off) {
-  std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-  f.seekg(static_cast<std::streamoff>(off));
-  char c = 0;
-  f.read(&c, 1);
-  c = static_cast<char>(c ^ 0x5a);
-  f.seekp(static_cast<std::streamoff>(off));
-  f.write(&c, 1);
-}
+using kgtest::flip_byte;
+using kgtest::make_base;
+using kgtest::make_pack;
+using kgtest::pack_meta;
+using kgtest::section;
+using kgtest::slurp;
+using kgtest::write_file;
 
 static std::string pad(std::string s) {
   if (s.size() % kAlign) s.append(kAlign - s.size() % kAlign, '\0');
@@ -147,51 +93,11 @@ static std::vector<Entry> three() {
   return {entry(Kind::Tools, 4096, 1000), entry(Kind::Runtime, 8192, 5000), entry(Kind::App, 16384, 700)};
 }
 
-static Meta pack_meta(const fs::path& tmp, const std::string& id) {
-  fs::path root = tmp / ("tree-" + id);
-  write_file(root / "GAME.EXE", "MZ this is " + id);
-  write_file(root / "data" / "level1.dat", std::string(3000, 'L') + id);
-  Meta m;
-  m.id = id;
-  m.name = "The game " + id;
-  m.year = 1999;
-  m.run.exe = "GAME.EXE";
-  m.tree = Tree::from_directory(root);
-  return m;
-}
-
-// A capsule with a body, as install writes one. The body is not a DwarFS image;
-// nothing here mounts it, and its hash is all that is checked.
-static fs::path make_pack(const fs::path& tmp, const std::string& id, size_t body_size = 20000) {
-  fs::path body = tmp / (id + ".body");
-  std::string b;
-  for (size_t i = 0; i < body_size; ++i) b.push_back(static_cast<char>('a' + (i * 7 + id.size()) % 26));
-  write_file(body, b);
-  fs::path out = tmp / "shelf" / (id + ".kgpack");
-  fs::create_directories(out.parent_path());
-  write_pack(out, pack_meta(tmp, id), WriteOptions{kg::Kind::Game, body, false});
-  return out;
-}
-
 static fs::path make_recipe(const fs::path& tmp, const std::string& id) {
   fs::path out = tmp / "shelf" / (id + ".recipe.kgpack");
   fs::create_directories(out.parent_path());
-  write_pack(out, pack_meta(tmp, id), WriteOptions{kg::Kind::Game, std::nullopt, false});
+  write_pack(out, pack_meta(tmp, id), WriteOptions{kg::PackKind::Game, std::nullopt, false});
   return out;
-}
-
-// A player base as the Makefile links one, but out of small files.
-static fs::path make_base(const fs::path& tmp) {
-  write_file(tmp / "in" / "bootstrap", std::string("\x7f" "ELF") + std::string(2000, 'b'));
-  write_file(tmp / "in" / "tools", std::string(6000, 't'));
-  write_file(tmp / "in" / "runtime", std::string(9000, 'r'));
-  write_file(tmp / "in" / "app", std::string(3000, 'a'));
-  fs::path base = tmp / "player-base";
-  link_file(base, tmp / "in" / "bootstrap",
-            {{Kind::Tools, tmp / "in" / "tools", ""},
-             {Kind::Runtime, tmp / "in" / "runtime", ""},
-             {Kind::App, tmp / "in" / "app", ""}});
-  return base;
 }
 
 static BundleMeta sample_meta(std::vector<std::string> ids) {
@@ -450,7 +356,7 @@ static void test_toc_truncation(const fs::path& tmp) {
 
   // And on real files, not just ranges, at the edges and a sample between.
   fs::path cut = tmp / "cut.bin";
-  std::string whole = read_file(p);
+  std::string whole = slurp(p);
   int real_accepted = 0;
   for (uint64_t k = 0; k < size; k += (k < 200 || k > size - 300) ? 1 : 97) {
     write_file(cut, std::string_view(whole).substr(0, k));
@@ -563,7 +469,7 @@ static void test_legacy(const fs::path& tmp) {
   // A v3 binary carrying a game, the way `export --standalone` appended one: the
   // game slot comes back as a pack, and the pack opens where it sits.
   fs::path pk = make_pack(tmp, "legacy-game");
-  std::string with_game = pad(body) + read_file(pk);
+  std::string with_game = pad(body) + slurp(pk);
   uint64_t goff = pad(body).size(), glen = fs::file_size(pk);
   write_file(p, with_game + legacy_trailer(3, 4096, 1000, 8192, 5000, 16384, 700, goff, glen));
   t = read_toc(p);
@@ -594,7 +500,7 @@ static void test_legacy(const fs::path& tmp) {
 static void test_pack_in_a_range(const fs::path& tmp) {
   section("kgpack opened at an offset");
   fs::path pk = make_pack(tmp, "ranged");
-  std::string bytes = read_file(pk);
+  std::string bytes = slurp(pk);
   fs::path host = tmp / "host.bin";
   write_file(host, std::string(8192, 'H') + bytes + std::string(4096, 'N'));
   Pack p = Pack::open(host, 8192, bytes.size());
@@ -790,7 +696,7 @@ static void test_build_and_verify(const fs::path& tmp) {
     CHECK_EQ(t.find(k)->off, bt.find(k)->off);
     CHECK_EQ(t.find(k)->blake3, bt.find(k)->blake3);
   }
-  CHECK_EQ(read_file(out).substr(0, 2004), read_file(tmp / "in" / "bootstrap").substr(0, 2004));
+  CHECK_EQ(slurp(out).substr(0, 2004), slurp(tmp / "in" / "bootstrap").substr(0, 2004));
   // Packs are in the order given, named by their game ids, and byte for byte.
   std::vector<const Entry*> ps = t.all(Kind::Pack);
   CHECK_EQ(ps.size(), 2u);
@@ -856,7 +762,7 @@ static void test_build_from_kretro(const fs::path& tmp) {
   // The base damaged inside kretro: the build refuses, and leaves nothing.
   fs::path hurt = tmp / "kretro-hurt";
   fs::copy_file(kretro, hurt, fs::copy_options::overwrite_existing);
-  flip(hurt, src.off + 100);  // inside the base's bootstrap, which no inner entry covers
+  flip_byte(hurt, src.off + 100);  // inside the base's bootstrap, which no inner entry covers
   fs::path out2 = tmp / "hurt.run";
   CHECK_THROWS_WITH(build_bundle(extract_player_base(hurt), sample_meta({"classic2"}), {f2}, out2),
                     "player base inside");
@@ -918,6 +824,56 @@ static void test_build_cancel(const fs::path& tmp) {
   build_bundle(BaseSource{base, 0, std::nullopt, std::nullopt}, sample_meta({"classic2"}), {f2}, out);
   CHECK(fs::exists(out));
   CHECK(!fs::exists(partial));
+}
+
+// The player-base helpers: where a table's last payload ends, and a base's own
+// table read the same whether the base is a file of its own or a range inside
+// a bigger one.
+static void test_base_helpers(const fs::path& tmp) {
+  section("player base: where its payloads end, and its table whole or in a range");
+  Toc t;
+  t.entries = three();
+  CHECK_EQ(t.payload_end(), uint64_t{16384 + 700});
+  // The furthest end, not the last entry's: order does not matter.
+  std::reverse(t.entries.begin(), t.entries.end());
+  CHECK_EQ(t.payload_end(), uint64_t{16384 + 700});
+  CHECK_EQ(Toc{}.payload_end(), uint64_t{0});
+
+  fs::path base = make_base(tmp);
+  BaseSource whole = BaseSource::whole_file(base);
+  CHECK_EQ(whole.off, uint64_t{0});
+  CHECK(!whole.len && !whole.blake3);
+  Toc wt = read_base_toc(whole);
+  CHECK_EQ(wt.base, uint64_t{0});
+  CHECK_EQ(wt.size, fs::file_size(base));
+
+  // The same base carried inside kretro: an offset and a length.
+  write_file(tmp / "in" / "kretro-app", std::string(4000, 'k'));
+  fs::path kretro = tmp / "kretro-helpers";
+  link_file(kretro, tmp / "in" / "bootstrap",
+            {{Kind::Tools, tmp / "in" / "tools", ""},
+             {Kind::Runtime, tmp / "in" / "runtime", ""},
+             {Kind::App, tmp / "in" / "kretro-app", ""},
+             {Kind::PlayerBase, base, ""}});
+  BaseSource inner = extract_player_base(kretro);
+  Toc it = read_base_toc(inner);
+  CHECK_EQ(it.base, inner.off);
+  CHECK_EQ(it.size, *inner.len);
+  CHECK_EQ(it.entries.size(), wt.entries.size());
+  CHECK_EQ(it.payload_end(), wt.payload_end());
+  // The table and trailer come after the last payload.
+  CHECK(it.payload_end() < *inner.len);
+
+  // An offset and no length: the rest of the file from there.
+  fs::path shifted = tmp / "shifted-base";
+  write_file(shifted, std::string(kAlign, 'x') + slurp(base));
+  Toc st = read_base_toc(BaseSource{shifted, kAlign, std::nullopt, std::nullopt});
+  CHECK_EQ(st.base, kAlign);
+  CHECK_EQ(st.size, fs::file_size(base));
+  CHECK_EQ(st.payload_end(), wt.payload_end());
+
+  // A base that is not there is named, as the build names it.
+  CHECK_THROWS_WITH(read_base_toc(BaseSource::whole_file(tmp / "no-such-base")), "cannot open");
 }
 
 static void test_build_refuses(const fs::path& tmp) {
@@ -982,7 +938,7 @@ static void test_build_refuses(const fs::path& tmp) {
   // A pack whose body rotted on the shelf is copied, found out by the verify
   // pass, and the half-made player goes with it.
   fs::path rotten = make_pack(tmp, "rotten");
-  flip(rotten, Pack::open(rotten).header().body_off + 10);
+  flip_byte(rotten, Pack::open(rotten).header().body_off + 10);
   CHECK_THROWS_WITH(build_bundle(src, sample_meta({"rotten"}), {rotten}, out), "game rotten is damaged");
   CHECK(nothing_left());
 }
@@ -999,7 +955,7 @@ static void test_verify_catches_damage(const fs::path& tmp) {
   fs::path p = tmp / "damaged.run";
   auto damaged_at = [&](uint64_t off) {
     fs::copy_file(good, p, fs::copy_options::overwrite_existing);
-    flip(p, off);
+    flip_byte(p, off);
     return p;
   };
 
@@ -1028,7 +984,7 @@ static void test_verify_catches_damage(const fs::path& tmp) {
 
   // A table that names one game but carries another: craft it by relabelling.
   {
-    std::string bytes = read_file(good);
+    std::string bytes = slurp(good);
     std::vector<Entry> es = t.entries;
     for (Entry& e : es) {
       if (e.name == "classic2") e.name = "classic1";
@@ -1039,7 +995,7 @@ static void test_verify_catches_damage(const fs::path& tmp) {
   }
   // bundle.meta and the table disagreeing about which games there are.
   {
-    std::string bytes = read_file(good);
+    std::string bytes = slurp(good);
     std::string body = bytes.substr(0, t.toc_off);
     std::vector<Entry> es;
     for (const Entry& e : t.entries) {
@@ -1109,7 +1065,7 @@ static void test_python_linker_agrees(const fs::path& tmp) {
         (in / "kretro-app").string() + " --player-base " + (in / "tiny").string() + " --b3 " + b3.string() +
         " --out " + (tmp / "never").string() + " 2>" + (tmp / "tiny.err").string() + " >/dev/null";
   CHECK(std::system(cmd.c_str()) != 0);
-  CHECK(read_file(tmp / "tiny.err").find("is not a linked v4 player base") != std::string::npos);
+  CHECK(slurp(tmp / "tiny.err").find("is not a linked v4 player base") != std::string::npos);
   CHECK(!fs::exists(tmp / "never"));
 
   // A link that fails after it started writing leaves no .partial behind: here
@@ -1136,6 +1092,114 @@ static void test_python_linker_agrees(const fs::path& tmp) {
   CHECK(fs::exists(tmp / "bare-b3") && hash_file(tmp / "bare-b3") == hash_file(base));
 }
 
+// ---- golden bytes -------------------------------------------------------------
+//
+// The exact bytes today's encoders write, pinned so that moving the code that
+// writes them can be shown to change nothing in a player. Every input is
+// fixed; a mismatch here is a format change, which a refactor must never make.
+
+// 32 consecutive byte values from `start`: fixed, and easy to find in a dump.
+static Hash golden_hash(uint8_t start) {
+  Hash h{};
+  for (size_t i = 0; i < h.size(); ++i) h[i] = static_cast<uint8_t>(start + i);
+  return h;
+}
+
+// Everything optional present when `full`, and all of it absent otherwise:
+// the banner, the icon, the cover, the gamepad and the key are each a key
+// that exists only when there is something in it.
+static BundleMeta golden_bundle_meta(bool full) {
+  BundleMeta m;
+  m.id = "example-bundle";
+  m.title = "Example Bundle";
+  m.version = "1.0";
+  m.built_at = "2026-01-02T03:04:05Z";
+  m.kretro_version = "dev";
+  m.rights_acknowledged = true;
+  m.licenses = {"wine/COPYING.LIB", "dxvk/LICENSE"};
+  GameMeta g;
+  g.id = "example-game";
+  g.name = "Example Game";
+  g.year = 1999;
+  g.backend = "dxvk";
+  g.needs_gpu = true;
+  g.display = "fit";
+  g.fullscreen = true;
+  g.extra_dlls = {GameMeta::Dll{"D3DImm.dll", "MZ dll"}};
+  if (full) {
+    m.banner = "\x89PNG banner";
+    m.icon = "\x89PNG icon";
+    g.cover = "\x89PNG cover";
+    g.gamepad = "a=Return\nstart=Escape\n";
+    g.key = GameMeta::Key{"ABCD-EFGH-IJKL-MNOP", "HKEY_LOCAL_MACHINE\\Software\\Example Publisher\\Example Game",
+                          "CDKey", "32"};
+  }
+  m.games.push_back(g);
+  return m;
+}
+
+static void test_golden_meta() {
+  section("golden: bundle.meta, with every optional part and with none");
+  const std::string full =
+      "ab66666f726d6174016269646e6578616d706c652d62756e646c65657469746c656e4578616d706c652042756e646c65"
+      "6776657273696f6e63312e30686275696c745f617474323032362d30312d30325430333a30343a30355a6e6b72657472"
+      "6f5f76657273696f6e636465766662616e6e65724b89504e472062616e6e65726469636f6e4989504e472069636f6e73"
+      "7269676874735f61636b6e6f776c6564676564f5686c6963656e736573827077696e652f434f5059494e472e4c49426c"
+      "6478766b2f4c4943454e53456567616d657381ab6269646c6578616d706c652d67616d65646e616d656c4578616d706c"
+      "652047616d6564796561721907cf65636f7665724a89504e4720636f766572676261636b656e64646478766b696e6565"
+      "64735f677075f567646973706c6179636669746a66756c6c73637265656ef56767616d6570616476613d52657475726e"
+      "0a73746172743d4573636170650a6a65787472615f646c6c7381a2646e616d656a443344496d6d2e646c6c6464617461"
+      "464d5a20646c6c636b6579a46576616c756573414243442d454647482d494a4b4c2d4d4e4f506d72656769737472795f"
+      "70617468783a484b45595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c65205075626c6973"
+      "6865725c4578616d706c652047616d656e72656769737472795f76616c75656543444b65796476696577623332";
+  CHECK_EQ(kgtest::to_hex(golden_bundle_meta(true).encode()), full);
+
+  const std::string bare =
+      "a966666f726d6174016269646e6578616d706c652d62756e646c65657469746c656e4578616d706c652042756e646c65"
+      "6776657273696f6e63312e30686275696c745f617474323032362d30312d30325430333a30343a30355a6e6b72657472"
+      "6f5f76657273696f6e63646576737269676874735f61636b6e6f776c6564676564f5686c6963656e736573827077696e"
+      "652f434f5059494e472e4c49426c6478766b2f4c4943454e53456567616d657381a86269646c6578616d706c652d6761"
+      "6d65646e616d656c4578616d706c652047616d6564796561721907cf676261636b656e64646478766b696e656564735f"
+      "677075f567646973706c6179636669746a66756c6c73637265656ef56a65787472615f646c6c7381a2646e616d656a44"
+      "3344496d6d2e646c6c6464617461464d5a20646c6c";
+  CHECK_EQ(kgtest::to_hex(golden_bundle_meta(false).encode()), bare);
+}
+
+static void test_golden_toc_and_trailer() {
+  section("golden: the table of contents and the trailer");
+  std::vector<Entry> es(3);
+  es[0].kind = Kind::Tools;
+  es[0].off = 4096;
+  es[0].len = 6000;
+  es[0].blake3 = golden_hash(0x10);
+  es[1].kind = Kind::Runtime;
+  es[1].off = 12288;
+  es[1].len = 9000;
+  es[1].blake3 = golden_hash(0x40);
+  es[2].kind = Kind::Pack;
+  es[2].off = 24576;
+  es[2].len = 20000;
+  es[2].blake3 = golden_hash(0x80);
+  es[2].name = "example-game";
+  const std::string toc = encode_toc(es);
+  const std::string want_toc =
+      "4b544f430100000003000000000000000100000000000000001000000000000070170000000000001011121314151617"
+      "18191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f000000000000000000000000000000000000000000000000"
+      "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      "020000000000000000300000000000002823000000000000404142434445464748494a4b4c4d4e4f5051525354555657"
+      "58595a5b5c5d5e5f00000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      "000000000000000000000000000000000000000000000000000000000000000005000000000000000060000000000000"
+      "204e000000000000808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f6578616d706c652d"
+      "67616d650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      "00000000000000000000000000000000";
+  CHECK_EQ(kgtest::to_hex(toc), want_toc);
+
+  const std::string want_trailer =
+      "4b524554524f7634040000000000000000b0000000000000900100000000000042843d4c2a469c50b3edc4801daca6c6"
+      "90d18fe1671e587419d3df5be51a7271";
+  CHECK_EQ(kgtest::to_hex(encode_trailer(45056, toc.size(), hash_bytes(toc.data(), toc.size()))), want_trailer);
+}
+
 }  // namespace kg::bundle
 
 int main() {
@@ -1156,16 +1220,17 @@ int main() {
     test_gamepad_form();
     test_build_and_verify(tmp);
     test_build_from_kretro(tmp);
+    test_base_helpers(tmp);
     test_build_cancel(tmp);
     test_build_refuses(tmp);
     test_verify_catches_damage(tmp);
     test_python_linker_agrees(tmp);
+    test_golden_meta();
+    test_golden_toc_and_trailer();
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

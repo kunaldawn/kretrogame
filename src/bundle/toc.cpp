@@ -8,32 +8,13 @@
 #include <cerrno>
 #include <cstring>
 
-#include "../pack/kgpack.h"
+#include "../util/bytes.h"
+#include "../util/safe_names.h"
 
 namespace kg::bundle {
 namespace fs = std::filesystem;
 
 namespace {
-
-void put_u32(std::string& s, uint32_t v) {
-  for (int i = 0; i < 4; ++i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
-}
-
-void put_u64(std::string& s, uint64_t v) {
-  for (int i = 0; i < 8; ++i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
-}
-
-uint32_t get_u32(std::string_view s, size_t off) {
-  uint32_t v = 0;
-  for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(static_cast<uint8_t>(s[off + i])) << (8 * i);
-  return v;
-}
-
-uint64_t get_u64(std::string_view s, size_t off) {
-  uint64_t v = 0;
-  for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(static_cast<uint8_t>(s[off + i])) << (8 * i);
-  return v;
-}
 
 [[noreturn]] void fail(Failure f, const std::string& what) { throw FormatError(f, what); }
 
@@ -79,7 +60,8 @@ std::string read_at(int fd, const fs::path& p, uint64_t off, size_t len) {
 // The checks every table gets, old or new. `limit` is where payloads must end:
 // the start of the table in v4, the start of the trailer in v2 and v3.
 void check_entries(const std::vector<Entry>& es, uint64_t limit, bool v4) {
-  bool seen[7] = {};
+  constexpr uint32_t kLastKnownKind = static_cast<uint32_t>(Kind::PlayerBase);
+  bool seen[kLastKnownKind + 1] = {};
   std::vector<std::string_view> ids;
   for (size_t i = 0; i < es.size(); ++i) {
     const Entry& e = es[i];
@@ -101,7 +83,7 @@ void check_entries(const std::vector<Entry>& es, uint64_t limit, bool v4) {
     // Kinds past what this build knows are skipped by every caller, not
     // refused: a newer builder may carry something an older player need not
     // understand, and bounds and overlap still hold them to the same rules.
-    if (k <= 6 && e.kind != Kind::Pack) {
+    if (k <= kLastKnownKind && e.kind != Kind::Pack) {
       if (seen[k]) fail(Failure::BadEntry, "the table names two " + kind_name(e.kind) + " payloads");
       seen[k] = true;
     }
@@ -143,15 +125,15 @@ Toc read_legacy(int fd, const fs::path& p, uint64_t base, uint64_t len) {
   Toc t;
   t.base = base;
   t.size = len;
-  t.version = get_u32(raw, 8);
+  t.version = le::get_u32(raw, 8);
   if (t.version != (v3 ? 3u : 2u)) {
     fail(Failure::BadVersion, "trailer version " + n(t.version) + " is not one this build reads");
   }
   auto slot = [&](Kind k, size_t at) {
     Entry e;
     e.kind = k;
-    e.off = get_u64(raw, at);
-    e.len = get_u64(raw, at + 8);
+    e.off = le::get_u64(raw, at);
+    e.len = le::get_u64(raw, at + 8);
     e.hashed = false;
     // An empty slot is how v3 says "no game"; it is not an entry.
     if (e.len != 0) t.entries.push_back(e);
@@ -200,23 +182,29 @@ std::vector<const Entry*> Toc::all(Kind k) const {
   return out;
 }
 
+uint64_t Toc::payload_end() const {
+  uint64_t end = 0;
+  for (const Entry& e : entries) end = std::max(end, e.off + e.len);
+  return end;
+}
+
 std::string encode_toc(const std::vector<Entry>& entries) {
   if (entries.size() > kMaxEntries) throw std::invalid_argument("too many entries for one table");
   std::string s;
   s.reserve(kTocHeaderSize + kRecordSize * entries.size());
   s.append(kTocMagic);
-  put_u32(s, kTocVersion);
-  put_u32(s, static_cast<uint32_t>(entries.size()));
-  put_u32(s, 0);
+  le::put_u32(s, kTocVersion);
+  le::put_u32(s, static_cast<uint32_t>(entries.size()));
+  le::put_u32(s, 0);
   for (const Entry& e : entries) {
     if (e.name.size() > kNameSize) {
       throw std::invalid_argument("the name " + e.name + " is longer than the table's " +
                                   std::to_string(kNameSize) + " bytes");
     }
-    put_u32(s, static_cast<uint32_t>(e.kind));
-    put_u32(s, e.flags);
-    put_u64(s, e.off);
-    put_u64(s, e.len);
+    le::put_u32(s, static_cast<uint32_t>(e.kind));
+    le::put_u32(s, e.flags);
+    le::put_u64(s, e.off);
+    le::put_u64(s, e.len);
     s.append(reinterpret_cast<const char*>(e.blake3.data()), e.blake3.size());
     s.append(e.name);
     s.append(kNameSize - e.name.size(), '\0');
@@ -229,10 +217,10 @@ std::string encode_trailer(uint64_t toc_off, uint64_t toc_len, const Hash& toc_h
   std::string s;
   s.reserve(kTrailerSize);
   s.append(kTrailerMagic);
-  put_u32(s, kTrailerVersion);
-  put_u32(s, 0);
-  put_u64(s, toc_off);
-  put_u64(s, toc_len);
+  le::put_u32(s, kTrailerVersion);
+  le::put_u32(s, 0);
+  le::put_u64(s, toc_off);
+  le::put_u64(s, toc_len);
   s.append(reinterpret_cast<const char*>(toc_hash.data()), toc_hash.size());
   return s;
 }
@@ -240,11 +228,11 @@ std::string encode_trailer(uint64_t toc_off, uint64_t toc_len, const Hash& toc_h
 std::vector<Entry> decode_toc(std::string_view raw, uint64_t limit) {
   if (raw.size() < kTocHeaderSize) fail(Failure::BadToc, "the table of contents is shorter than its header");
   if (raw.substr(0, 4) != kTocMagic) fail(Failure::BadToc, "the table of contents does not start with KTOC");
-  uint32_t version = get_u32(raw, 4);
+  uint32_t version = le::get_u32(raw, 4);
   if (version != kTocVersion) {
     fail(Failure::BadVersion, "table of contents version " + n(version) + " is not one this build reads");
   }
-  uint32_t count = get_u32(raw, 8);
+  uint32_t count = le::get_u32(raw, 8);
   if (count > kMaxEntries) {
     fail(Failure::TooMany, "the table of contents claims " + n(count) + " entries; no bundle has more than " +
                                n(kMaxEntries));
@@ -259,10 +247,10 @@ std::vector<Entry> decode_toc(std::string_view raw, uint64_t limit) {
   for (uint32_t i = 0; i < count; ++i) {
     std::string_view r = raw.substr(kTocHeaderSize + kRecordSize * i, kRecordSize);
     Entry e;
-    e.kind = static_cast<Kind>(get_u32(r, 0));
-    e.flags = get_u32(r, 4);
-    e.off = get_u64(r, 8);
-    e.len = get_u64(r, 16);
+    e.kind = static_cast<Kind>(le::get_u32(r, 0));
+    e.flags = le::get_u32(r, 4);
+    e.off = le::get_u64(r, 8);
+    e.len = le::get_u64(r, 16);
     std::memcpy(e.blake3.data(), r.data() + 24, e.blake3.size());
     std::string_view name = r.substr(56, kNameSize);
     size_t nul = name.find('\0');
@@ -321,12 +309,12 @@ Toc read_toc(const fs::path& p, uint64_t off, uint64_t len) {
   Toc t;
   t.base = off;
   t.size = len;
-  t.version = get_u32(tr, 8);
+  t.version = le::get_u32(tr, 8);
   if (t.version != kTrailerVersion) {
     fail(Failure::BadVersion, "trailer version " + n(t.version) + " is not one this build reads");
   }
-  t.toc_off = get_u64(tr, 16);
-  t.toc_len = get_u64(tr, 24);
+  t.toc_off = le::get_u64(tr, 16);
+  t.toc_len = le::get_u64(tr, 24);
   std::memcpy(t.toc_hash.data(), tr.data() + 32, t.toc_hash.size());
 
   // The length is checked against the most a table can be before anything is

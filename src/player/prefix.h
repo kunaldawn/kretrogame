@@ -86,6 +86,24 @@ PrefixResult ensure_prefix(const rt::Env& e, const std::filesystem::path& prefix
 // when there is no path or no value name to put it at.
 std::string key_registry(const bundle::GameMeta::Key& k);
 
+// Removes the prefix's host device links: the dosdevices entries named like
+// "d::", which a mount manager makes for a drive of the machine's own. A
+// device link a mount manager made before the system bus was taken away - by
+// a player older than this one - still claims its letter, and Wine removes
+// the drive link beside it whenever that device is empty. No game this player
+// runs has a host device, so none of them stay. The drive links themselves
+// ("c:", "d:") are left alone.
+void drop_host_device_links(const std::filesystem::path& prefix);
+
+// Puts the author's embedded key into the prefix's registry with regedit, in
+// `wine_env`. Once per prefix, like the installer's own keys: a marker in the
+// prefix, .kretro-key, holds the hash of what was written, and a game that
+// later rewrites the value keeps what it wrote. `say` hears when the key goes
+// in. Throws std::runtime_error when regedit fails.
+void apply_embedded_key(const rt::Env& wine_env, const std::filesystem::path& prefix,
+                        const bundle::GameMeta::Key& key,
+                        const std::function<void(const std::string&)>& say);
+
 // Writes the author's extra files into `dir`, each only when it is not already
 // there with the same bytes. Returns the DLL overrides that make Wine load the
 // DLLs among them before its own ("ddraw=n,b;d3d8=n,b"), empty when there are

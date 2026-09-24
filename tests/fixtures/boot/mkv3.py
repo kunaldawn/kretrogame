@@ -50,7 +50,7 @@ def main() -> int:
 
     for p in (a.bootstrap, a.tools, a.image, a.app):
         if not p.is_file():
-            print(f"kretro-link: missing {p}", file=sys.stderr)
+            print(f"mkv3: missing {p}", file=sys.stderr)
             return 1
 
     tools = a.tools.read_bytes()

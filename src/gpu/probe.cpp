@@ -1,7 +1,6 @@
 #include "probe.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <regex>
@@ -10,7 +9,9 @@
 
 #include <unistd.h>
 
+#include "files.h"
 #include "../util/paths.h"
+#include "../util/text.h"
 
 namespace kg::gpu {
 namespace fs = std::filesystem;
@@ -24,12 +25,6 @@ std::string read_first_line(const fs::path& p) {
   return s;
 }
 
-std::string trim(std::string s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return a == std::string::npos ? "" : s.substr(a, b - a + 1);
-}
-
 Vendor vendor_from_pci(uint32_t id) {
   switch (id) {
     case 0x10de: return Vendor::Nvidia;
@@ -37,19 +32,6 @@ Vendor vendor_from_pci(uint32_t id) {
     case 0x8086: return Vendor::Intel;
     default: return Vendor::Unknown;
   }
-}
-
-bool starts_with(const std::string& s, const std::string& prefix) {
-  return s.rfind(prefix, 0) == 0;
-}
-
-std::string join(const std::vector<std::string>& v) {
-  std::string s;
-  for (const std::string& x : v) {
-    if (!s.empty()) s += ":";
-    s += x;
-  }
-  return s;
 }
 
 // Copies the runtime's own manifests for one loader into `into`, with any
@@ -90,7 +72,10 @@ std::vector<std::string> adopt_runtime(const fs::path& runtime_root, const fs::p
         // A path the runtime does not have becomes a bare name, which the
         // loader then looks for on our library path and nowhere else.
         std::string to = fs::exists(ours, ec) ? ours.string() : lib.filename().string();
-        json = std::regex_replace(json, re, "\"library_path\": \"" + to + "\"");
+        std::string with = "\"library_path\": \"";
+        with += to;
+        with += '"';
+        json = std::regex_replace(json, re, with);
       }
     }
     fs::path dst = into / f.filename();
@@ -149,7 +134,7 @@ Report probe(const Host& h) {
     std::vector<fs::path> cards;
     for (const fs::directory_entry& de : fs::directory_iterator(drm, ec)) {
       std::string base = de.path().filename().string();
-      if (starts_with(base, "card") && base.find('-') == std::string::npos) cards.push_back(de.path());
+      if (base.starts_with("card") && base.find('-') == std::string::npos) cards.push_back(de.path());
     }
     std::sort(cards.begin(), cards.end());
     for (const fs::path& card : cards) {
@@ -169,7 +154,7 @@ Report probe(const Host& h) {
       // first renderD in /dev/dri would give every card the same one.
       for (const fs::directory_entry& sub : fs::directory_iterator(card / "device" / "drm", ec)) {
         std::string n = sub.path().filename().string();
-        if (starts_with(n, "renderD") && d.node.empty()) d.node = "/dev/dri/" + n;
+        if (n.starts_with("renderD") && d.node.empty()) d.node = "/dev/dri/" + n;
       }
       ec.clear();
       if (d.node.empty()) d.node = "/dev/dri/" + base;
@@ -188,13 +173,22 @@ Report probe(const Host& h) {
 
   // NVIDIA proprietary.
   r.nvidia = capture_nvidia(h);
-  r.nvidia_present = r.nvidia.present();
-  r.nvidia_version = r.nvidia.kernel_version;
-  for (const fs::path& p : r.nvidia.libs) r.nvidia_libs.push_back(p.string());
   for (const Problem& p : r.nvidia.problems) r.issues.push_back(p);
-
-  for (const Problem& p : r.issues) r.problems.push_back(p.line());
   return r;
+}
+
+std::vector<std::string> Report::nvidia_libs() const {
+  std::vector<std::string> out;
+  out.reserve(nvidia.libs.size());
+  for (const fs::path& p : nvidia.libs) out.push_back(p.string());
+  return out;
+}
+
+std::vector<std::string> Report::problem_lines() const {
+  std::vector<std::string> out;
+  out.reserve(issues.size());
+  for (const Problem& p : issues) out.push_back(p.line());
+  return out;
 }
 
 void materialize(Report& r) { materialize(r, gl_dir(), runtime_dir()); }
@@ -235,49 +229,8 @@ void materialize(Report& r, const fs::path& gl_root, const fs::path& runtime_roo
       egl.push_back(s);
     }
   }
-  if (!icd.empty()) r.env.emplace_back("VK_DRIVER_FILES", join(icd));
-  if (!egl.empty()) r.env.emplace_back("__EGL_VENDOR_LIBRARY_FILENAMES", join(egl));
-}
-
-void print_report(const Report& r) {
-  std::printf("display\n");
-  if (r.wayland) std::printf("  wayland     %s\n", r.wayland_display.c_str());
-  if (r.x11) std::printf("  x11         %s\n", r.x_display.c_str());
-  if (!r.wayland && !r.x11) std::printf("  none\n");
-
-  std::printf("\ngraphics\n");
-  if (r.devices.empty()) {
-    std::printf("  no DRM devices\n");
-  }
-  for (const Device& d : r.devices) {
-    std::printf("  %-22s %-8s %-9s %s\n", d.node.c_str(), vendor_name(d.vendor),
-                d.driver.empty() ? "-" : d.driver.c_str(), d.readable ? "accessible" : "NOT ACCESSIBLE");
-  }
-
-  std::printf("\nnvidia\n");
-  switch (r.nvidia.state) {
-    case NvidiaState::Absent: std::printf("  not present - bundled Mesa will be used\n"); break;
-    case NvidiaState::Ok: std::printf("  kernel module %s, libraries match\n", r.nvidia_version.c_str()); break;
-    case NvidiaState::Missing:
-      std::printf("  kernel module %s, libraries NOT INSTALLED\n", r.nvidia_version.c_str());
-      break;
-    case NvidiaState::Mismatch:
-      std::printf("  kernel module %s, libraries are %s - MISMATCH\n", r.nvidia_version.c_str(),
-                  r.nvidia.library_version.c_str());
-      break;
-  }
-  if (r.nvidia.usable()) {
-    std::printf("  libraries     %zu taken\n", r.nvidia_libs.size());
-    if (!r.nvidia_link_dir.empty()) std::printf("  linked into   %s\n", r.nvidia_link_dir.c_str());
-  }
-  for (const auto& [k, v] : r.env) std::printf("  %s=%s\n", k.c_str(), v.c_str());
-
-  std::printf("\n");
-  if (r.problems.empty()) {
-    std::printf("no problems found\n");
-  } else {
-    for (const std::string& p : r.problems) std::printf("problem: %s\n", p.c_str());
-  }
+  if (!icd.empty()) r.env.emplace_back("VK_DRIVER_FILES", join(icd, ":"));
+  if (!egl.empty()) r.env.emplace_back("__EGL_VENDOR_LIBRARY_FILENAMES", join(egl, ":"));
 }
 
 }  // namespace kg::gpu

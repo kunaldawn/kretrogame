@@ -92,7 +92,8 @@ std::string usage(const std::string& exe) {
   for (const auto& [cmd, text] : lines) w = std::max(w, exe.size() + 1 + cmd.size());
   std::string out;
   for (const auto& [cmd, text] : lines) {
-    std::string left = cmd.empty() ? exe : exe + " " + cmd;
+    std::string left = exe;
+    if (!cmd.empty()) left += " " + cmd;
     for (size_t i = 0; i < text.size(); ++i) {
       out += "  " + (i == 0 ? left : std::string()) +
              std::string(w - (i == 0 ? left.size() : 0) + 3, ' ') + text[i] + "\n";

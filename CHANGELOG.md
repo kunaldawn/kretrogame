@@ -19,7 +19,9 @@ All notable changes to kretrogame are recorded here. The format follows
   without a window.
 - File format v4: a fixed table of contents and trailer, `bundle.meta`
   describing the bundle, and packs opened where they sit inside the file.
-  Every payload is checked with BLAKE3. v2 and v3 binaries still run.
+  The table records a BLAKE3 for every payload; the bootstrap checks the
+  table's own hash on every start, and the player verifies each game's pack
+  the first time it plays it. v2 and v3 binaries still run.
 - `build/player-base`, linked by `make` and carried inside kretro, so building
   a player needs no network and no source tree.
 - A player runtime cut from the same image as kretro's, without the authoring
@@ -31,7 +33,8 @@ All notable changes to kretrogame are recorded here. The format follows
   without FUSE; an optional desktop menu entry.
 - `make format`, `make format-check` and `make lint` (clang-format and
   clang-tidy in the GUI builder image), `.editorconfig`, a GitHub Actions
-  workflow running `make test` and `make lint`, `CONTRIBUTING.md`, and this
+  workflow running `make test`, `make lint`, `make format-check` and
+  `make programs`, `CONTRIBUTING.md`, and this
   changelog.
 - The MIT licence for kretrogame's own code (`LICENSE`); third-party
   components keep their own licences, in `licenses/`.
@@ -40,10 +43,17 @@ All notable changes to kretrogame are recorded here. The format follows
 
 - The bootstrap reads a table of contents, runs DwarFS from memory rather
   than from disk, and runs on a noexec `/tmp` or cache.
-- The source tree is laid out for maintenance: `tools/` is `scripts/`, the
-  tests are split into `tests/unit/`, `tests/integration/` and
-  `tests/fixtures/`, and the Makefile is split into `mk/*.mk`. Every make
+- The source tree is laid out for maintenance: build scripts live in
+  `scripts/`, the tests are split into `tests/unit/`, `tests/integration/`
+  and `tests/fixtures/`, and the Makefile is split into `mk/*.mk`. Every make
   target keeps its name.
+- The source layout is refactored: the programs' `main`s are in `src/apps/`,
+  kretro's commands in `src/cli/`, the backend policy in `src/backend/`,
+  Wine's prefix files in `src/wine/`, the session, install, Bundles page
+  logic and GUI are split into a file per concern, the bootstrap into a unit
+  per concern, and the unit tests share `tests/unit/support/`. `docs/`
+  describes the architecture, the file formats, building and testing. No
+  behaviour, message, exit status or on-disk format changes.
 
 ### Removed
 

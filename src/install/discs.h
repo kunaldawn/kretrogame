@@ -7,6 +7,7 @@
 // label, and falls back to position only where the labels are unhelpful.
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "../disc/disc.h"
+#include "../pack/kgpack.h"
 #include "../rt/env.h"
 
 namespace kg::install {
@@ -37,5 +39,21 @@ int pick_disc(const std::vector<disc::Disc>& discs, const DiscRef& ref);
 std::vector<disc::Disc> resolve_discs(const rt::Env& e, const std::vector<std::string>& refs,
                                       const std::filesystem::path& work,
                                       const std::function<void(const std::string&)>& say);
+
+// The reference form the resolvers understand: "archive#LABEL".
+std::string disc_ref_for(const disc::Disc& d);
+
+// The Meta::Disc a pack records for one opened disc: its label and serial, the
+// reference it is found again by, the absolute path it was opened from, and
+// whether its tree travels in the body. `ref` is the caller's, because a
+// rebuild keeps the reference its recipe used rather than coining a new one.
+Meta::Disc disc_entry(const disc::Disc& d, std::string ref, bool embedded);
+
+// Where the disc a recipe names is on this machine: the collection file its
+// reference names, and failing that the one whose fingerprint matches entry
+// `index` of `fingerprints`, when the recipe recorded one. Empty when neither
+// finds it.
+std::filesystem::path locate_disc(const DiscRef& ref, const std::vector<DiscFingerprint>& fingerprints,
+                                  size_t index);
 
 }  // namespace kg::install

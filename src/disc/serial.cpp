@@ -4,16 +4,12 @@
 #include <cctype>
 #include <regex>
 
+#include "../util/text.h"
+
 namespace fs = std::filesystem;
 
 namespace kg::disc {
 namespace {
-
-std::string lower(std::string_view s) {
-  std::string o(s);
-  for (char& c : o) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return o;
-}
 
 bool contains(const std::string& hay, const char* needle) {
   return hay.find(needle) != std::string::npos;
@@ -39,7 +35,7 @@ void add(std::vector<KeyCandidate>& out, const std::string& v, std::string_view 
 std::vector<KeyCandidate> extract_keys(std::string_view text, std::string_view source) {
   std::vector<KeyCandidate> out;
   const std::string s(text);
-  const std::string low = lower(s);
+  const std::string low = to_lower(s);
 
   // Grouped forms are distinctive enough to stand alone.
   static const std::regex five(R"([A-Z0-9]{5}(?:-[A-Z0-9]{5}){2,4})");
@@ -72,7 +68,7 @@ std::vector<Companion> scan_companions(const fs::path& image) {
     if (ec) break;
     std::string name = de.path().filename().string();
     if (de.path() == image) continue;
-    std::string low = lower(name);
+    std::string low = to_lower(name);
     std::string kind;
     if (de.is_directory(ec)) {
       if (low == "crack" || low == "cracks") kind = "crack";

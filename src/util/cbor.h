@@ -5,9 +5,9 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kg::cbor {
@@ -33,6 +33,11 @@ class Encoder {
   std::string buf_;
 };
 
+// One key and its value in a decoded map. Declared ahead of Value because
+// Value holds a vector of them: std::vector accepts an incomplete element type,
+// whereas std::pair<Value, Value> needs Value complete where it is named.
+struct MapEntry;
+
 struct Value {
   enum class Type { Uint, Int, Bytes, Text, Array, Map, Bool, Null };
 
@@ -41,7 +46,7 @@ struct Value {
   int64_t i = 0;
   std::string s;  // Bytes and Text both
   std::vector<Value> arr;
-  std::vector<std::pair<Value, Value>> map;
+  std::vector<MapEntry> map;
   bool b = false;
 
   bool is_uint() const { return type == Type::Uint; }
@@ -59,6 +64,11 @@ struct Value {
   std::string text_or(std::string_view def = "") const;
   uint64_t uint_or(uint64_t def = 0) const;
   bool bool_or(bool def = false) const;
+};
+
+struct MapEntry {
+  Value key;
+  Value value;
 };
 
 struct Limits {

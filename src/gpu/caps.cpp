@@ -8,21 +8,12 @@
 #include <sstream>
 #include <tuple>
 
+#include "../util/text.h"
+
 namespace kg::gpu {
 namespace fs = std::filesystem;
 
 namespace {
-
-std::string trim(std::string s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return a == std::string::npos ? "" : s.substr(a, b - a + 1);
-}
-
-std::string lower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-  return s;
-}
 
 // "key = value" or "key: value", as vulkaninfo and glxinfo print them.
 bool field(const std::string& line, const std::string& key, char sep, std::string* value) {
@@ -160,7 +151,7 @@ GlInfo parse_glxinfo(const std::string& text) {
   }
   if (g.renderer.empty()) return g;
   g.ran = true;
-  std::string r = lower(g.renderer);
+  std::string r = to_lower(g.renderer);
   g.hardware = r.find("llvmpipe") == std::string::npos && r.find("softpipe") == std::string::npos &&
                r.find("swrast") == std::string::npos && r.find("software rasterizer") == std::string::npos;
   return g;
@@ -182,13 +173,13 @@ bool detect_gamescope(const Host& h) {
   std::stringstream ss(h.env("XDG_CURRENT_DESKTOP"));
   std::string part;
   while (std::getline(ss, part, ':')) {
-    if (lower(trim(part)) == "gamescope") return true;
+    if (to_lower(trim(part)) == "gamescope") return true;
   }
   return false;
 }
 
 SessionType detect_session(const Host& h) {
-  std::string t = lower(h.env("XDG_SESSION_TYPE"));
+  std::string t = to_lower(h.env("XDG_SESSION_TYPE"));
   if (t == "wayland") return SessionType::Wayland;
   if (t == "x11") return SessionType::X11;
   // Unset, or "tty" from a terminal that still has a display forwarded to it:

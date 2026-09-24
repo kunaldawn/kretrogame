@@ -1,8 +1,9 @@
 # Builds the two toolchain images and runs what needs neither game media nor
-# the runtime: the unit tests, the Bundles page, the bootstrap tests, and
-# clang-tidy. The scripts in tests/integration/ need your own discs (named in a
-# gitignored tests/local.env) or build/runtime.dwarfs, and are run by hand, as
-# is make check-generic, which needs the local collection data it checks for.
+# the runtime: the unit tests, the Bundles page, the bootstrap tests,
+# clang-tidy and the format check. The scripts in tests/integration/ need your
+# own discs (named in a gitignored tests/local.env) or build/runtime.dwarfs,
+# and are run by hand, as is make check-generic, which needs the local
+# collection data it checks for.
 name: ci
 
 on:
@@ -29,3 +30,13 @@ jobs:
 
       - name: make lint
         run: make lint
+
+      # Only the files listed in FORMAT_CLEAN (mk/sources.mk); the rest are
+      # formatted on the lines an edit changes.
+      - name: make format-check
+        run: make format-check
+
+      # The programs, compiled and linked. Not plain make: its last step,
+      # link, needs build/runtime.dwarfs, which CI does not build.
+      - name: make programs
+        run: make programs

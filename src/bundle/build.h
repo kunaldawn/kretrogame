@@ -1,4 +1,5 @@
-// Building a player, and proving the one just built is the one that was meant.
+// Writing and verifying a player file: building one, and proving the one just
+// built is the one that was meant.
 //
 // A player is the player base - bootstrap, tools, runtime, app, exactly as
 // kretro carries it - with bundle.meta and the chosen packs appended after it,
@@ -25,27 +26,10 @@
 
 #include "../util/hash.h"
 #include "meta.h"
+#include "progress.h"
 #include "toc.h"
 
 namespace kg::bundle {
-
-struct Progress {
-  std::string_view stage;  // "copying" or "verifying"
-  uint64_t done = 0;
-  uint64_t total = 0;
-};
-
-struct Callbacks {
-  // Called about once a megabyte. May be empty.
-  std::function<void(const Progress&)> progress;
-  // Asked as often; returning true stops the work with Cancelled. May be empty.
-  std::function<bool()> cancelled;
-};
-
-class Cancelled : public std::runtime_error {
- public:
-  Cancelled() : std::runtime_error("cancelled") {}
-};
 
 // A player base: `len` bytes at `off` in `path`, or the whole file when `len`
 // is empty. `blake3`, when set, is what those bytes must hash to - the
@@ -56,7 +40,15 @@ struct BaseSource {
   uint64_t off = 0;
   std::optional<uint64_t> len;
   std::optional<Hash> blake3;
+
+  // A player base on its own, as `make player-base` links one: the whole file.
+  static BaseSource whole_file(const std::filesystem::path& p);
 };
+
+// The table of the base's own bytes: `len` of them at `off`, or the rest of the
+// file from `off` when `len` is empty. Throws std::runtime_error ("cannot open
+// <path>: <reason>") when the file's size cannot be had, and FormatError.
+Toc read_base_toc(const BaseSource& b);
 
 // Finds the player base inside kretro's own file (the kind 6 entry), and checks
 // that its table is a player base's table. Nothing is copied: the result is a

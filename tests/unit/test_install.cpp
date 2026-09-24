@@ -12,55 +12,30 @@
 #include <unistd.h>
 
 #include "disc/drive.h"
+#include "install/body.h"
+#include "install/collection.h"
 #include "install/install.h"
-#include "install/iso.h"
+#include "disc/members.h"
 #include "pack/tree.h"
+#include "rt/env.h"
 #include "install/discs.h"
 #include "install/keys.h"
-#include "install/registry.h"
-#include "session/session.h"
+#include "session/compositor.h"
+#include "session/journal.h"
+#include "session/layers.h"
+#include "session/lock.h"
+#include "session/prefix.h"
+#include "session/saves.h"
+#include "session/unpack.h"
 #include "util/hash.h"
 #include "util/paths.h"
+#include "wine/registry.h"
+#include "wine/system_files.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
-
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-#define CHECK_THROWS(expr)                                                \
-  do {                                                                    \
-    ++checks;                                                             \
-    bool threw = false;                                                   \
-    try { expr; } catch (const std::exception&) { threw = true; }         \
-    if (!threw) {                                                         \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  expected a throw from %s\n",    \
-                   __FILE__, __LINE__, #expr);                            \
-    }                                                                     \
-  } while (0)
 
 static void test_reg_parse() {
   // Wine's user.reg format: a bracketed key line with a timestamp, then
@@ -76,7 +51,7 @@ static void test_reg_parse() {
       "\n"
       "[Software\\\\Wine] 111\n"
       "\"Version\"=\"win98\"\n";
-  auto v = install::parse_reg(text);
+  auto v = wine::parse_reg(text);
   CHECK_EQ(v.size(), 4u);
   CHECK_EQ(v[0].key, std::string("Software\\Example Publisher\\Adventure II"));
   CHECK_EQ(v[0].name, std::string("InstallPath"));
@@ -90,16 +65,16 @@ static void test_reg_parse() {
 }
 
 static void test_reg_diff() {
-  std::vector<install::RegValue> before = {
+  std::vector<wine::RegValue> before = {
       {"Software\\Wine", "Version", "sz", "win98"},
       {"Software\\X", "A", "sz", "1"},
   };
-  std::vector<install::RegValue> after = {
+  std::vector<wine::RegValue> after = {
       {"Software\\Wine", "Version", "sz", "winxp"},      // changed
       {"Software\\X", "A", "sz", "1"},                   // unchanged
       {"Software\\Game", "InstallPath", "sz", "C:\\G"},  // added
   };
-  auto d = install::diff_reg(before, after);
+  auto d = wine::diff_reg(before, after);
   CHECK_EQ(d.size(), 2u);
   // Deterministic order, so a recipe's fragment is byte-stable.
   CHECK_EQ(d[0].key, std::string("Software\\Game"));
@@ -108,18 +83,18 @@ static void test_reg_diff() {
 
   // A value that disappeared is not carried into the fragment: an installer
   // deleting something is not state a capsule needs to recreate.
-  auto none = install::diff_reg(after, before);
+  auto none = wine::diff_reg(after, before);
   CHECK_EQ(none.size(), 1u);
   CHECK_EQ(none[0].data, std::string("win98"));
 }
 
 static void test_reg_fragment() {
-  std::vector<install::RegValue> v = {
+  std::vector<wine::RegValue> v = {
       {"Software\\Game", "InstallPath", "sz", "C:\\G"},
       {"Software\\Game", "Res", "dword", "00000001"},
       {"Software\\Other", "@", "sz", "d"},
   };
-  std::string f = install::to_reg_fragment(v);
+  std::string f = wine::to_reg_fragment(v);
   CHECK(f.rfind("REGEDIT4", 0) == 0);
   CHECK(f.find("[HKEY_CURRENT_USER\\Software\\Game]") != std::string::npos);
   // Backslashes are doubled in .reg data, and each key appears once.
@@ -140,10 +115,10 @@ static void test_reg_fragment() {
 // straight into HKLM, and the unfiltered diff carried it into the fragment, the
 // body's registry.reg and every recipe exported from the pack.
 static void test_the_serial_stays_here() {
-  const std::vector<install::RegValue> before = {
+  const std::vector<wine::RegValue> before = {
       {"Software\\Wine", "Version", "sz", "winxp"},
   };
-  std::vector<install::RegValue> after = before;
+  std::vector<wine::RegValue> after = before;
   const char* key = "Software\\Example Publisher\\Adventure II";
   after.push_back({key, "InstallPath", "sz", "C:\\Program Files\\Adventure II"});
   after.push_back({key, "CDKey", "sz", "ABCD-1234-EFGH-5678"});
@@ -156,11 +131,11 @@ static void test_the_serial_stays_here() {
   after.push_back({key, "Language", "sz", "English"});
 
   std::vector<std::string> dropped;
-  std::vector<install::RegValue> kept =
-      install::without_serials(install::diff_reg(before, after), &dropped);
+  std::vector<wine::RegValue> kept =
+      wine::without_serials(wine::diff_reg(before, after), &dropped);
 
   CHECK_EQ(dropped.size(), 3u);
-  std::string frag = install::to_reg_fragment(kept);
+  std::string frag = wine::to_reg_fragment(kept);
   CHECK(frag.find("ABCD-1234-EFGH-5678") == std::string::npos);
   CHECK(frag.find("9F3K2M8Q4T7X") == std::string::npos);
   CHECK(frag.find("\"RegistrationNumber\"") == std::string::npos);
@@ -174,14 +149,14 @@ static void test_the_serial_stays_here() {
   CHECK(frag.find("English") != std::string::npos);
 
   // The rule, value by value.
-  CHECK(install::is_serial_value({"K", "CDKey", "sz", "ABCD-1234-EFGH-5678"}));
-  CHECK(install::is_serial_value({"K", "cd key", "sz", "ABCD12345678"}));
-  CHECK(install::is_serial_value({"K", "ProductKey", "sz", "AAAAA BBBBB CCCCC"}));
-  CHECK(install::is_serial_value({"K", "CDKey", "hex", "00,01"}));
-  CHECK(!install::is_serial_value({"K", "CDKey", "sz", ""}));
-  CHECK(!install::is_serial_value({"K", "Serial", "dword", "1a2b3c4d"}));
-  CHECK(!install::is_serial_value({"K", "Publisher", "sz", "Publisher-1996"}));
-  CHECK(!install::is_serial_value({"K", "Key", "sz", "F1"}));
+  CHECK(wine::is_serial_value({"K", "CDKey", "sz", "ABCD-1234-EFGH-5678"}));
+  CHECK(wine::is_serial_value({"K", "cd key", "sz", "ABCD12345678"}));
+  CHECK(wine::is_serial_value({"K", "ProductKey", "sz", "AAAAA BBBBB CCCCC"}));
+  CHECK(wine::is_serial_value({"K", "CDKey", "hex", "00,01"}));
+  CHECK(!wine::is_serial_value({"K", "CDKey", "sz", ""}));
+  CHECK(!wine::is_serial_value({"K", "Serial", "dword", "1a2b3c4d"}));
+  CHECK(!wine::is_serial_value({"K", "Publisher", "sz", "Publisher-1996"}));
+  CHECK(!wine::is_serial_value({"K", "Key", "sz", "F1"}));
 }
 
 static void test_reg_hives(const fs::path& tmp) {
@@ -196,7 +171,7 @@ static void test_reg_hives(const fs::path& tmp) {
                                      << "[Software\\\\Example Publisher\\\\Adventure II] 1\n"
                                      << "\"Resolution\"=dword:00000001\n";
 
-  std::vector<install::RegValue> v = install::snapshot_prefix(prefix);
+  std::vector<wine::RegValue> v = wine::snapshot_prefix(prefix);
   CHECK_EQ(v.size(), 2u);
   CHECK_EQ(v[0].name, std::string("InstallPath"));
   CHECK_EQ(v[0].hive, std::string("HKEY_LOCAL_MACHINE"));
@@ -204,7 +179,7 @@ static void test_reg_hives(const fs::path& tmp) {
   CHECK_EQ(v[1].hive, std::string("HKEY_CURRENT_USER"));
 
   // The same key path under two hives is two sections, not one.
-  std::string f = install::to_reg_fragment(v);
+  std::string f = wine::to_reg_fragment(v);
   CHECK(f.find("[HKEY_LOCAL_MACHINE\\Software\\Example Publisher\\Adventure II]") !=
         std::string::npos);
   CHECK(f.find("[HKEY_CURRENT_USER\\Software\\Example Publisher\\Adventure II]") !=
@@ -214,11 +189,11 @@ static void test_reg_hives(const fs::path& tmp) {
 
   // And two values sharing a name in different hives are two slots, so a diff
   // does not silently cancel one against the other.
-  std::vector<install::RegValue> before = {
+  std::vector<wine::RegValue> before = {
       {"Software\\Game", "Path", "sz", "C:\\G", "HKEY_CURRENT_USER"}};
-  std::vector<install::RegValue> after = {
+  std::vector<wine::RegValue> after = {
       {"Software\\Game", "Path", "sz", "C:\\G", "HKEY_LOCAL_MACHINE"}};
-  CHECK_EQ(install::diff_reg(before, after).size(), 1u);
+  CHECK_EQ(wine::diff_reg(before, after).size(), 1u);
 }
 
 // Wine wraps a long binary value over several lines, ending each but the last
@@ -234,14 +209,14 @@ static void test_reg_continuation() {
       "  04,05,06,07,\\\n"
       "  08,09\n"
       "\"After\"=\"still parsed\"\n";
-  auto v = install::parse_reg(text);
+  auto v = wine::parse_reg(text);
   CHECK_EQ(v.size(), 2u);
   CHECK_EQ(v[0].name, std::string("CDKey"));
   CHECK_EQ(v[0].type, std::string("hex"));
   CHECK_EQ(v[0].data, std::string("00,01,02,03,04,05,06,07,08,09"));
   CHECK_EQ(v[1].name, std::string("After"));
 
-  std::string f = install::to_reg_fragment(v);
+  std::string f = wine::to_reg_fragment(v);
   CHECK(f.find("\"CDKey\"=hex:00,01,02,03,04,05,06,07,08,09\n") != std::string::npos);
   CHECK(f.find("\\\n") == std::string::npos);  // nothing dangling
 }
@@ -257,7 +232,7 @@ static void test_reg_expand_and_multi() {
       "[Software\\\\Game] 1\n"
       "\"Path\"=str(2):\"%ProgramFiles%\\\\Game\"\n"
       "\"Langs\"=str(7):\"en\\0fr\\0\"\n";
-  auto v = install::parse_reg(text);
+  auto v = wine::parse_reg(text);
   CHECK_EQ(v.size(), 2u);
   CHECK_EQ(v[0].name, std::string("Path"));
   CHECK_EQ(v[0].type, std::string("expand_sz"));
@@ -265,7 +240,7 @@ static void test_reg_expand_and_multi() {
   CHECK_EQ(v[1].type, std::string("multi_sz"));
   CHECK_EQ(v[1].data, std::string("en\0fr\0", 6));
 
-  std::string f = install::to_reg_fragment(v);
+  std::string f = wine::to_reg_fragment(v);
   // UTF-16LE, comma-separated, with the terminating NUL Wine dropped put back.
   CHECK(f.find("\"Langs\"=hex(7):65,00,6e,00,00,00,66,00,72,00,00,00,00,00\n") !=
         std::string::npos);
@@ -352,25 +327,25 @@ static void test_body_layout(const fs::path& tmp) {
 // or the recipient gets registrations pointing at nothing.
 static void test_what_the_installer_wrote_outside_the_game(const fs::path& tmp) {
   // The rule, first, with no filesystem in it.
-  CHECK(install::is_outside_the_game("windows/system32/msvcrt.dll", "Program Files/Adventure II"));
-  CHECK(install::is_outside_the_game("windows/system32/MSVCRT.DLL", ""));
-  CHECK(!install::is_outside_the_game("Program Files/Adventure II/Adventure II.exe",
-                                      "Program Files/Adventure II"));
+  CHECK(wine::is_outside_the_game("windows/system32/msvcrt.dll", "Program Files/Adventure II"));
+  CHECK(wine::is_outside_the_game("windows/system32/MSVCRT.DLL", ""));
+  CHECK(!wine::is_outside_the_game("Program Files/Adventure II/Adventure II.exe",
+                                   "Program Files/Adventure II"));
   // The same path as the installer spelled it, and as Windows spells it.
-  CHECK(!install::is_outside_the_game("program files\\adventure ii\\data.pak",
-                                      "Program Files/Adventure II"));
-  CHECK(!install::is_outside_the_game("Program Files/Adventure II", "Program Files/Adventure II"));
+  CHECK(!wine::is_outside_the_game("program files\\adventure ii\\data.pak",
+                                   "Program Files/Adventure II"));
+  CHECK(!wine::is_outside_the_game("Program Files/Adventure II", "Program Files/Adventure II"));
   // A sibling whose name merely starts the same way is not inside it.
-  CHECK(install::is_outside_the_game("Program Files/Adventure II Expansion/x.dll",
-                                     "Program Files/Adventure II"));
+  CHECK(wine::is_outside_the_game("Program Files/Adventure II Expansion/x.dll",
+                                  "Program Files/Adventure II"));
   // Scratch never travels, whoever left it.
-  CHECK(!install::is_outside_the_game("windows/Temp/_ins0432._mp", "Program Files/Game"));
-  CHECK(!install::is_outside_the_game("users/kunal/Temp/ikernel.exe", "Program Files/Game"));
-  CHECK(!install::is_outside_the_game("users/kunal/Local Settings/Temp/setup.inx",
-                                      "Program Files/Game"));
+  CHECK(!wine::is_outside_the_game("windows/Temp/_ins0432._mp", "Program Files/Game"));
+  CHECK(!wine::is_outside_the_game("users/kunal/Temp/ikernel.exe", "Program Files/Game"));
+  CHECK(!wine::is_outside_the_game("users/kunal/Local Settings/Temp/setup.inx",
+                                   "Program Files/Game"));
   // But the user's own data directories do.
-  CHECK(install::is_outside_the_game("users/kunal/Application Data/Game/config.ini",
-                                     "Program Files/Game"));
+  CHECK(wine::is_outside_the_game("users/kunal/Application Data/Game/config.ini",
+                                  "Program Files/Game"));
 
   // Then the two ends of the round trip, over a real drive_c.
   fs::path root = tmp / "system-files";
@@ -391,14 +366,14 @@ static void test_what_the_installer_wrote_outside_the_game(const fs::path& tmp) 
   };
   std::vector<std::string> outside;
   for (const std::string& w : written) {
-    if (install::is_outside_the_game(w, "Program Files/Game")) outside.push_back(w);
+    if (wine::is_outside_the_game(w, "Program Files/Game")) outside.push_back(w);
   }
   // Three: the two runtime files and the one that was deleted between the diff
   // and now. The rule is about paths and knows nothing about the filesystem.
   CHECK_EQ(outside.size(), 3u);
 
   fs::path system = root / "system";
-  install::SystemFiles got = install::gather_system_files(drive_c, outside, system);
+  wine::SystemFiles got = wine::gather_system_files(drive_c, outside, system);
   CHECK_EQ(got.files, 2u);
   CHECK_EQ(got.bytes, fs::file_size(drive_c / "windows" / "system32" / "msvcrt.dll") +
                           fs::file_size(drive_c / "windows" / "system32" / "comdlg32.ocx"));
@@ -411,7 +386,7 @@ static void test_what_the_installer_wrote_outside_the_game(const fs::path& tmp) 
   fs::path prefix_c = root / "prefix" / "drive_c";
   fs::create_directories(prefix_c / "windows" / "system32");
   std::ofstream(prefix_c / "windows" / "system32" / "msvcrt.dll") << "wine's own";
-  CHECK_EQ(install::restore_system_files(system, prefix_c), 2u);
+  CHECK_EQ(wine::restore_system_files(system, prefix_c), 2u);
   std::ifstream back(prefix_c / "windows" / "system32" / "msvcrt.dll");
   std::string line;
   std::getline(back, line);
@@ -420,7 +395,7 @@ static void test_what_the_installer_wrote_outside_the_game(const fs::path& tmp) 
 
   // Nothing to restore is not a failure: a copy install writes no system files
   // and a revision 1 pack has nowhere to keep them.
-  CHECK_EQ(install::restore_system_files(root / "nosuchtree", prefix_c), 0u);
+  CHECK_EQ(wine::restore_system_files(root / "nosuchtree", prefix_c), 0u);
 }
 
 // Defect (4): a pack built with "include the discs" unchecked still has to be a
@@ -452,9 +427,10 @@ static void test_a_body_without_discs_still_carries_everything_else(const fs::pa
 }
 
 // A mounted CD is a directory, and so is a disc somebody already extracted -
-// and "load game CD/DVD" is the headline path, not an edge case. Every reader
-// below used to hand the path to 7z, which exits 2 on a directory: the wizard's
-// third step took the throw out of the SDL loop and the program with it.
+// and "load game CD/DVD" is the headline path, not an edge case. A reader
+// below that handed the path to 7z would see it exit 2 on a directory, and the
+// wizard's third step would take the throw out of the SDL loop and the program
+// with it.
 static void test_a_directory_is_a_disc(const fs::path& tmp) {
   rt::Env e;  // no runtime: a directory is read directly, and 7z is never asked
   fs::path disc = tmp / "mounted-cd";
@@ -586,13 +562,13 @@ static void test_registry_marker(const fs::path& tmp) {
   const std::string frag = "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\Example]\n\"A\"=\"1\"\n";
 
   // Nothing applied yet.
-  CHECK(!install::registry_marker_matches(prefix, frag));
+  CHECK(!wine::registry_marker_matches(prefix, frag));
 
-  install::write_registry_marker(prefix, frag);
-  CHECK(install::registry_marker_matches(prefix, frag));
+  wine::write_registry_marker(prefix, frag);
+  CHECK(wine::registry_marker_matches(prefix, frag));
 
   // A different fragment is a different pack, and gets applied.
-  CHECK(!install::registry_marker_matches(prefix, frag + "\"B\"=\"2\"\n"));
+  CHECK(!wine::registry_marker_matches(prefix, frag + "\"B\"=\"2\"\n"));
 
   // The marker holds the hash and nothing else, so it can be read by a person
   // and cannot be confused with a prefix's own files.
@@ -602,17 +578,17 @@ static void test_registry_marker(const fs::path& tmp) {
   CHECK_EQ(line, to_hex(hash_string(frag)));
 
   // A prefix that does not exist is not a match, and asking is not an error.
-  CHECK(!install::registry_marker_matches(tmp / "no-such-prefix", frag));
+  CHECK(!wine::registry_marker_matches(tmp / "no-such-prefix", frag));
 }
 
 // The unpacked-game cache, and why an id is not enough to key it on.
 //
 // Where FUSE is unavailable the body is unpacked once into state/extracted/<id>
-// and played from there. The cache used to be gated on a marker file whose
-// contents were the literal "1\n": it said that something had been unpacked,
-// never what. So reinstalling a game - same id, new bytes - was played from the
-// install before it, and a pack whose body is laid out the other way round was
-// reached through a path that does not exist, which surfaces as "no such exe in
+// and played from there. A cache gated on a marker file whose contents are the
+// literal "1\n" says that something has been unpacked, never what. Then
+// reinstalling a game - same id, new bytes - plays the install before it, and a
+// pack whose body is laid out the other way round is reached through a path
+// that does not exist, which surfaces as "no such exe in
 // the installed game" about a pack that is perfectly good.
 //
 // The stamp says the three things that make one unpacked tree a different tree.
@@ -627,7 +603,7 @@ static void test_extraction_stamp(const fs::path& tmp) {
 
   // The same install, laid out the way this build lays bodies out. Nothing else
   // about it has changed - and it still may not be played from the flat tree,
-  // because the game is a directory down from where it used to be.
+  // because the game is a directory down from where the flat tree has it.
   Meta rooted = flat;
   rooted.layout = "rooted";
   CHECK(session::extraction_stamp(flat, flat_h) != session::extraction_stamp(rooted, flat_h));
@@ -900,24 +876,24 @@ static void test_registry_survives_a_rebuild() {
                             const std::function<void(const std::string&)>&, const fs::path&>,
       "prepare_prefix(env, prefix, home, meta, apply_registry, say, system_tree)");
 
-  const std::vector<install::RegValue> installer_wrote = {
+  const std::vector<wine::RegValue> installer_wrote = {
       {"Software\\Example Publisher\\Adventure II", "InstallPath", "sz",
        "C:\\Program Files\\Adventure II"},
       {"Software\\Example Publisher\\Adventure II", "Resolution", "dword", "00000001"},
   };
-  const std::vector<install::RegValue> stock = {{"Software\\Wine", "Version", "sz", "winxp"}};
+  const std::vector<wine::RegValue> stock = {{"Software\\Wine", "Version", "sz", "winxp"}};
 
   // What install::run does today, with apply_registry false: the staging prefix
   // is stock before the installer runs and carries the game's keys after.
-  std::vector<install::RegValue> after = stock;
+  std::vector<wine::RegValue> after = stock;
   after.insert(after.end(), installer_wrote.begin(), installer_wrote.end());
-  std::string rebuilt = install::to_reg_fragment(install::diff_reg(stock, after));
+  std::string rebuilt = wine::to_reg_fragment(wine::diff_reg(stock, after));
   CHECK(rebuilt.find("\"InstallPath\"") != std::string::npos);
   CHECK(rebuilt.find("\"Resolution\"") != std::string::npos);
 
   // What it would do if the recipe's fragment had been applied first: the keys
   // are on both sides, so the diff is empty and the fragment comes out blank.
-  std::string cancelled = install::to_reg_fragment(install::diff_reg(after, after));
+  std::string cancelled = wine::to_reg_fragment(wine::diff_reg(after, after));
   CHECK(cancelled.find("InstallPath") == std::string::npos);
 }
 
@@ -996,9 +972,9 @@ static void test_disc_pick() {
 
 // A recipe is a file people are told to send each other, and it names the disc
 // - and for installer_exe the executable - that the machine opening it will
-// open and run. `dir / name` throws `dir` away when `name` is absolute, so the
-// collection directory used to vanish from under the join and a shared recipe
-// could name any file on the importer's disk.
+// open and run. `dir / name` throws `dir` away when `name` is absolute, so
+// unchecked, the collection directory would vanish from under the join and a
+// shared recipe could name any file on the importer's disk.
 static void test_a_recipe_names_no_file_outside_the_collection(const fs::path& tmp) {
   fs::path collection = tmp / "collection";
   fs::create_directories(collection);
@@ -1107,13 +1083,130 @@ static void test_a_writable_layer_from_inside_a_snap(const fs::path& tmp) {
   CHECK_EQ(runs, 1);
 }
 
+// ---- golden bytes -------------------------------------------------------------
+//
+// The exact text today's writers put on disk, pinned so that moving the code
+// that writes it can be shown to change nothing a machine already holds.
+// Every input is fixed: no clock, no hash of anything that varies.
+
+// 32 consecutive byte values from `start`: fixed, and easy to find in a dump.
+static Hash golden_hash(uint8_t start) {
+  Hash h{};
+  for (size_t i = 0; i < h.size(); ++i) h[i] = static_cast<uint8_t>(start + i);
+  return h;
+}
+
+// Both hives, a default value, an escaped string, a dword, raw hex, and the
+// two types that are written as hex(2) and hex(7) UTF-16LE.
+static void test_golden_reg_fragment() {
+  const std::string hklm(wine::kHiveLocalMachine);
+  const std::string hkcu(wine::kHiveCurrentUser);
+  const std::string key = "Software\\Example Publisher\\Example Game";
+  const std::vector<wine::RegValue> v = {
+      {key, "InstallPath", "sz", "C:\\Games\\Example \"Game\"", hklm},
+      {key, "@", "sz", "default", hklm},
+      {key, "Path", "expand_sz", "%ProgramFiles%\\Example", hklm},
+      {key, "Discs", "multi_sz", std::string("D:\0E:", 5), hklm},
+      {key, "Resolution", "dword", "00000001", hkcu},
+      {key, "Blob", "hex", "01,02,ff", hkcu},
+  };
+  const std::string want =
+      "REGEDIT4\n"
+      "\n"
+      "[HKEY_CURRENT_USER\\Software\\Example Publisher\\Example Game]\n"
+      "\"Blob\"=hex:01,02,ff\n"
+      "\"Resolution\"=dword:00000001\n"
+      "\n"
+      "[HKEY_LOCAL_MACHINE\\Software\\Example Publisher\\Example Game]\n"
+      "@=\"default\"\n"
+      "\"Discs\"=hex(7):44,00,3a,00,00,00,45,00,3a,00,00,00\n"
+      "\"InstallPath\"=\"C:\\\\Games\\\\Example \\\"Game\\\"\"\n"
+      "\"Path\"=hex(2):25,00,50,00,72,00,6f,00,67,00,72,00,61,00,6d,00,46,00,69,00,6c,00,65,00,73,00,25,00,"
+      "5c,00,45,00,78,00,61,00,6d,00,70,00,6c,00,65,00,00,00\n";
+  CHECK_EQ(wine::to_reg_fragment(v), want);
+}
+
+static void test_golden_journal() {
+  session::Record r;
+  r.started = 1700000000;
+  r.ended = 1700003600;
+  r.runtime_id = "wine-10";
+  r.note = "said \"hi\"\n\tand left\x01";
+  r.screenshot = "shots/one.png";
+  r.files_written = 12;
+  r.status = 3;
+  r.generation = "gen-0001";
+  session::write_record("journal-golden", r);
+  const std::string want =
+      "{\n"
+      "  \"started\": 1700000000,\n"
+      "  \"ended\": 1700003600,\n"
+      "  \"seconds\": 3600,\n"
+      "  \"runtime\": \"wine-10\",\n"
+      "  \"files_written\": 12,\n"
+      "  \"status\": 3,\n"
+      "  \"generation\": \"gen-0001\",\n"
+      "  \"screenshot\": \"shots/one.png\",\n"
+      "  \"note\": \"said \\\"hi\\\"\\n\\tand left\\u0001\"\n"
+      "}\n";
+  CHECK_EQ(kgtest::slurp(game_saves_dir("journal-golden") / "journal" / "1700000000.json"), want);
+}
+
+static void test_golden_extraction_stamp() {
+  Meta m;
+  m.layout = "flat";
+  m.body.blake3 = golden_hash(0x11);
+  Header h;
+  h.blake3_root = golden_hash(0x22);
+  CHECK_EQ(session::extraction_stamp(m, h),
+           std::string("flat 1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30 "
+                       "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"));
+  m.layout = "rooted";
+  CHECK_EQ(session::extraction_stamp(m, h),
+           std::string("rooted 1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30 "
+                       "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"));
+}
+
+static void test_golden_key_vault(const fs::path& tmp) {
+  // A tab or a newline in a field is flattened to a space, or it would be a
+  // field or a line of its own.
+  const std::vector<install::StoredKey> keys = {{"example-game", "ABCD-EFGH", "from the box"},
+                                                {"example-game-2", "1111\t2222", "a\nnote"}};
+  const fs::path f = tmp / "golden" / "keys.txt";
+  install::save_keys(f, keys);
+  const std::string want =
+      "# Serials you have entered. This file stays on this machine: a key is\n"
+      "# yours, not the game's, and it goes into no pack and over no network.\n"
+      "#\n"
+      "# game\tkey\tnote\n"
+      "example-game\tABCD-EFGH\tfrom the box\n"
+      "example-game-2\t1111 2222\ta note\n";
+  CHECK_EQ(kgtest::slurp(f), want);
+}
+
+static void test_env_get_and_append() {
+  // How WINEDLLOVERRIDES grows: the pack's, then a player's own, then the
+  // backend's, each after a ';'. A value that is unset or empty is simply set.
+  rt::Env e;
+  CHECK_EQ(e.get("WINEDLLOVERRIDES"), std::string());
+  e.append("WINEDLLOVERRIDES", "ddraw=n", ';');
+  CHECK_EQ(e.get("WINEDLLOVERRIDES"), std::string("ddraw=n"));
+  e.append("WINEDLLOVERRIDES", "d3d9=n,b", ';');
+  CHECK_EQ(e.get("WINEDLLOVERRIDES"), std::string("ddraw=n;d3d9=n,b"));
+  CHECK_EQ(e.vars.size(), 1u);
+  e.set("PATH", "");
+  e.append("PATH", "/bin", ':');
+  CHECK_EQ(e.get("PATH"), std::string("/bin"));
+  CHECK_EQ(e.vars.size(), 2u);
+}
+
 int main() {
   fs::path tmp = fs::temp_directory_path() / "kretro-test-install";
   fs::remove_all(tmp);
   fs::create_directories(tmp);
 
   // The game lock and the saves generations live under state_dir(), and
-  // state_dir() caches its answer in a function-local static (paths.cpp:19),
+  // state_dir() caches its answer in a function-local static (util/paths.cpp),
   // so this has to happen before anything at all asks where state lives.
   ::setenv("KRETRO_STATE", (tmp / "state").c_str(), 1);
   ensure_state_dirs();
@@ -1143,12 +1236,15 @@ int main() {
     test_disc_pick();
     test_a_recipe_names_no_file_outside_the_collection(tmp);
     test_a_writable_layer_from_inside_a_snap(tmp);
+    test_golden_reg_fragment();
+    test_golden_journal();
+    test_golden_extraction_stamp();
+    test_golden_key_vault(tmp);
+    test_env_get_and_append();
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

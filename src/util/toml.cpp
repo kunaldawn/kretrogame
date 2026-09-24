@@ -5,15 +5,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "text.h"
+
 namespace kg {
 namespace {
-
-std::string trim(std::string_view s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  if (a == std::string_view::npos) return "";
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return std::string(s.substr(a, b - a + 1));
-}
 
 // Strips a quoted string, honouring the handful of escapes a game manifest
 // could plausibly contain.
@@ -81,15 +76,15 @@ Toml Toml::parse(std::string_view text, const std::string& origin) {
   while (std::getline(in, raw)) {
     ++line;
     // A '#' inside a quoted value is not a comment.
-    std::string s;
+    std::string kept;
     char quote = 0;
     for (char c : raw) {
       if (!quote && c == '#') break;
       if (quote && c == quote) quote = 0;
       else if (!quote && (c == '"' || c == '\'')) quote = c;
-      s.push_back(c);
+      kept.push_back(c);
     }
-    s = trim(s);
+    const std::string s = trim(kept);
     if (s.empty()) continue;
 
     if (s.front() == '[') {
@@ -105,7 +100,7 @@ Toml Toml::parse(std::string_view text, const std::string& origin) {
     std::string key = trim(s.substr(0, eq));
     std::string val = trim(s.substr(eq + 1));
     if (key.empty()) throw std::runtime_error(origin + ":" + std::to_string(line) + ": empty key");
-    if (!section.empty()) key = section + "." + key;
+    if (!section.empty()) key.insert(0, section + ".");
 
     Value v;
     if (!val.empty() && val.front() == '[') {
@@ -129,7 +124,7 @@ Toml Toml::parse(std::string_view text, const std::string& origin) {
         }
         ++line;
         size_t hash = more.find('#');
-        if (hash != std::string::npos && more.find('"') == std::string::npos) more = more.substr(0, hash);
+        if (hash != std::string::npos && more.find('"') == std::string::npos) more.resize(hash);
         scan(more);
         val += " " + trim(more);
       }
@@ -153,7 +148,13 @@ Toml Toml::parse(std::string_view text, const std::string& origin) {
         v.i = std::stoll(val, &used);
         if (used != val.size()) throw std::invalid_argument("trailing");
       } catch (const std::exception&) {
-        throw std::runtime_error(origin + ":" + std::to_string(line) + ": cannot read value '" + val + "'");
+        std::string msg = origin;
+        msg += ':';
+        msg += std::to_string(line);
+        msg += ": cannot read value '";
+        msg += val;
+        msg += '\'';
+        throw std::runtime_error(msg);
       }
     }
     t.values_[key] = std::move(v);
@@ -190,6 +191,21 @@ std::vector<std::string> Toml::array(const std::string& key) const {
   auto it = values_.find(key);
   if (it == values_.end() || it->second.t != Value::T::Array) return {};
   return it->second.a;
+}
+
+std::string toml_string(const std::string& s) {
+  std::string o = "\"";
+  for (char ch : s) {
+    switch (ch) {
+      case '\\': o += "\\\\"; break;
+      case '"': o += "\\\""; break;
+      case '\n': o += "\\n"; break;
+      case '\t': o += "\\t"; break;
+      case '\r': o += "\\r"; break;
+      default: o.push_back(ch);
+    }
+  }
+  return o + "\"";
 }
 
 }  // namespace kg

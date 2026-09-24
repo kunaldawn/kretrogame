@@ -8,18 +8,13 @@
 #include <stdexcept>
 #include <unistd.h>
 
+#include "../util/text.h"
 #include "cue.h"
 
 namespace fs = std::filesystem;
 
 namespace kg::disc {
 namespace {
-
-std::string lower(std::string_view s) {
-  std::string o(s);
-  for (char& c : o) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return o;
-}
 
 bool ends_with(std::string_view s, std::string_view suffix) {
   return s.size() >= suffix.size() &&
@@ -64,13 +59,13 @@ std::vector<Member> parse_7z_listing(std::string_view out) {
 }
 
 bool is_disc_image(std::string_view name) {
-  std::string n = lower(name);
+  std::string n = to_lower(name);
   return ends_with(n, ".iso") || ends_with(n, ".cue") || ends_with(n, ".bin") ||
          ends_with(n, ".img") || ends_with(n, ".mdf");
 }
 
 bool is_archive(std::string_view name) {
-  std::string n = lower(name);
+  std::string n = to_lower(name);
   return ends_with(n, ".zip") || ends_with(n, ".7z") || ends_with(n, ".rar");
 }
 
@@ -125,7 +120,7 @@ void probe_into(const rt::Env& e, const fs::path& root, const fs::path& on_disk,
     c.archive = root;
     c.name = name;
     c.size = fs::file_size(on_disk, ec);
-    c.is_cue = ends_with(lower(name), ".cue");
+    c.is_cue = ends_with(to_lower(name), ".cue");
     out.push_back(c);
     return;
   }
@@ -138,21 +133,21 @@ void probe_into(const rt::Env& e, const fs::path& root, const fs::path& on_disk,
   // .bin stand on its own.
   bool has_cue = false;
   for (const Member& m : members) {
-    if (ends_with(lower(basename_of(m.path)), ".cue")) has_cue = true;
+    if (ends_with(to_lower(basename_of(m.path)), ".cue")) has_cue = true;
   }
 
   for (const Member& m : members) {
     std::string base = basename_of(m.path);
     if (base.empty()) continue;
     if (is_disc_image(base)) {
-      if (has_cue && ends_with(lower(base), ".bin")) continue;
+      if (has_cue && ends_with(to_lower(base), ".bin")) continue;
       Candidate c;
       c.archive = root;
       c.members = trail;
       c.members.push_back(m.path);
       c.name = base;
       c.size = m.size;
-      c.is_cue = ends_with(lower(base), ".cue");
+      c.is_cue = ends_with(to_lower(base), ".cue");
       out.push_back(c);
     } else if (is_archive(base)) {
       descend(e, root, on_disk, trail, m, depth, work, out);

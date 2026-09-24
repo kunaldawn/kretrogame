@@ -21,7 +21,6 @@
 #pragma once
 
 #include <filesystem>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,11 +52,6 @@ struct Nvidia {
   bool usable() const { return state == NvidiaState::Ok; }
 };
 
-// The version string the kernel module reports, or empty with no module.
-// /sys/module/nvidia/version first; /proc/driver/nvidia/version on the
-// oldest drivers, which do not publish the sysfs file.
-std::string nvidia_kernel_version(const Host& h);
-
 // Looks. Modifies nothing.
 Nvidia capture_nvidia(const Host& h);
 
@@ -77,16 +71,5 @@ struct Routing {
 // variables that make the loaders use exactly that. A capture that is not
 // usable routes nothing.
 Routing route_nvidia(const Nvidia& n, const std::filesystem::path& dir);
-
-// Writing what the loaders of a game already running read. Every start of a
-// bundle rebuilds these directories - --doctor included - while a game
-// started earlier from the same state reads them, and a Vulkan loader reads
-// its manifests again at each instance. So nothing is removed and made
-// again: each file or link is written beside itself and renamed over, and is
-// the old one or the new one and never missing; then keep_only removes what
-// `dir` holds that is not in `names`, other starts' temporaries aside.
-void replace_file(const std::filesystem::path& dst, const std::string& bytes);
-void replace_symlink(const std::filesystem::path& target, const std::filesystem::path& link);
-void keep_only(const std::filesystem::path& dir, const std::set<std::string>& names);
 
 }  // namespace kg::gpu

@@ -96,10 +96,10 @@ struct Reader {
         // Each element costs at least one byte, so a length that exceeds the
         // remaining buffer is a lie and we reject it before allocating.
         if (n > in.size() - pos) bad("array longer than the buffer allows");
-        // And the item budget is spent before the space is. It used to be
-        // checked one element at a time, after the reserve, so a few kilobytes
-        // of pack declaring an array of forty million asked for four gigabytes
-        // and got it - the budget refused the pack a moment later, out of
+        // And the item budget is spent before the space is. Checked one
+        // element at a time, after the reserve, it would let a few kilobytes
+        // of pack declaring an array of forty million ask for four gigabytes
+        // and get it - the budget would refuse the pack a moment later, out of
         // memory it had already committed.
         if (n > lim.max_items - items) bad("too many items");
         v.type = Value::Type::Array;
@@ -110,14 +110,14 @@ struct Reader {
       case 5: {
         uint64_t n = argument(info);
         if (n > (in.size() - pos) / 2 + 1) bad("map longer than the buffer allows");
-        // A pair is two items, and a pair is 224 bytes here.
+        // An entry is two items, a key and its value, and 224 bytes here.
         if (n > (lim.max_items - items) / 2) bad("too many items");
         v.type = Value::Type::Map;
         v.map.reserve(static_cast<size_t>(std::min<uint64_t>(n, kReserveCap)));
         for (uint64_t k = 0; k < n; ++k) {
           Value key = value(depth + 1);
           Value val = value(depth + 1);
-          v.map.emplace_back(std::move(key), std::move(val));
+          v.map.push_back(MapEntry{std::move(key), std::move(val)});
         }
         return v;
       }
@@ -180,7 +180,7 @@ void Encoder::null_val() { buf_.push_back(static_cast<char>(0xe0 | 22)); }
 const Value* Value::find(std::string_view key) const {
   if (type != Type::Map) return nullptr;
   for (const auto& kv : map) {
-    if (kv.first.type == Type::Text && kv.first.s == key) return &kv.second;
+    if (kv.key.type == Type::Text && kv.key.s == key) return &kv.value;
   }
   return nullptr;
 }

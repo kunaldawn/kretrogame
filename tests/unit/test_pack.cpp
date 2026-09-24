@@ -8,55 +8,18 @@
 
 #include "pack/kgpack.h"
 #include "pack/tree.h"
+#include "util/bytes.h"
 #include "util/cbor.h"
 #include "util/hash.h"
 #include "util/toml.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
 
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                       \
-  do {                                                                    \
-    ++checks;                                                             \
-    if (!(cond)) {                                                        \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                     \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                       \
-  do {                                                                       \
-    ++checks;                                                                \
-    auto va = (a);                                                           \
-    auto vb = (b);                                                           \
-    if (!(va == vb)) {                                                       \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s != %s\n", __FILE__, __LINE__, #a, #b); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_THROWS(expr)                                                \
-  do {                                                                    \
-    ++checks;                                                             \
-    bool threw = false;                                                   \
-    try { expr; } catch (const std::exception&) { threw = true; }         \
-    if (!threw) {                                                         \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  expected a throw from %s\n",    \
-                   __FILE__, __LINE__, #expr);                            \
-    }                                                                     \
-  } while (0)
-
-static void section(const char* name) { std::fprintf(stderr, "%s\n", name); }
-
-static void write_file(const fs::path& p, std::string_view content) {
-  fs::create_directories(p.parent_path());
-  std::ofstream f(p, std::ios::binary);
-  f.write(content.data(), static_cast<std::streamsize>(content.size()));
-}
+using kgtest::section;
+using kgtest::write_file;
 
 static void test_hash() {
   section("hash");
@@ -181,10 +144,10 @@ static void test_pack_roundtrip(const fs::path& tmp) {
   m.tree = Tree::from_directory(root);
 
   // A recipe pack: no body, but a full tree and a real Merkle root.
-  write_pack(out, m, WriteOptions{Kind::Game, std::nullopt, false});
+  write_pack(out, m, WriteOptions{PackKind::Game, std::nullopt, false});
   Pack p = Pack::open(out);
   CHECK(!p.has_body());
-  CHECK_EQ(p.header().kind, Kind::Game);
+  CHECK_EQ(p.header().kind, PackKind::Game);
   CHECK_EQ(p.header().blake3_root, m.tree.root());
   CHECK_EQ(p.meta().id, std::string("classic2"));
   CHECK_EQ(p.meta().name, std::string("Classic 2"));
@@ -206,7 +169,7 @@ static void test_pack_roundtrip(const fs::path& tmp) {
   fs::path body = tmp / "body.bin";
   write_file(body, std::string(100000, 'x'));
   fs::path cap = tmp / "classic2.capsule.kgpack";
-  write_pack(cap, m, WriteOptions{Kind::Game, body, false});
+  write_pack(cap, m, WriteOptions{PackKind::Game, body, false});
   Pack c = Pack::open(cap);
   CHECK(c.has_body());
   CHECK_EQ(c.header().body_len, 100000u);
@@ -234,7 +197,7 @@ static void test_container_revision(const fs::path& tmp) {
   fs::path out = tmp / "rev.kgpack";
   Meta m;
   m.id = "rev";
-  write_pack(out, m, WriteOptions{Kind::Game, std::nullopt, false});
+  write_pack(out, m, WriteOptions{PackKind::Game, std::nullopt, false});
 
   CHECK_EQ(static_cast<int>(Pack::open(out).header().revision), 2);
 
@@ -257,6 +220,33 @@ static void test_container_revision(const fs::path& tmp) {
   fs::path zero = tmp / "rev0.kgpack";
   stamp(zero, 0);
   CHECK_THROWS(Pack::open(zero));
+}
+
+// The two spellings of a kind: the word kgpack create takes after --kind, and
+// the name kgpack info prints. They differ for a save export ("save" in, and
+// "save-export" out), and that difference is kept, so each kind is checked
+// against both words rather than round-tripped through one.
+static void test_pack_kind_names() {
+  section("pack kind names");
+  struct Case {
+    PackKind kind;
+    const char* word;
+    const char* name;
+  };
+  const Case cases[] = {
+      {PackKind::Game, "game", "game"},
+      {PackKind::Runtime, "runtime", "runtime"},
+      {PackKind::SaveExport, "save", "save-export"},
+  };
+  for (const Case& c : cases) {
+    CHECK(parse_pack_kind(c.word) == c.kind);
+    CHECK_EQ(std::string(pack_kind_name(c.kind)), std::string(c.name));
+  }
+  CHECK(parse_pack_kind("game") == parse_pack_kind(pack_kind_name(PackKind::Game)));
+  CHECK(parse_pack_kind("runtime") == parse_pack_kind(pack_kind_name(PackKind::Runtime)));
+  CHECK(!parse_pack_kind("save-export").has_value());
+  CHECK(!parse_pack_kind("nope").has_value());
+  CHECK(!parse_pack_kind("").has_value());
 }
 
 // The layout is a field and not an inference from the revision, because the two
@@ -302,9 +292,9 @@ static uint64_t peak_rss() {
   return 0;
 }
 
-// A body used to be a game tree and read_all could hold one. A rooted body is a
+// A flat body is a game tree and read_all could hold one. A rooted body is a
 // game tree plus its discs plus their audio, and four gigabytes is ordinary;
-// read_all appends 64 KiB at a time with no reserve, so peak occupancy was
+// read_all appends 64 KiB at a time with no reserve, so its peak occupancy is
 // worse than a single copy of it.
 static void test_streamed_body(const fs::path& tmp) {
   section("streamed body");
@@ -352,7 +342,7 @@ static void test_streamed_body(const fs::path& tmp) {
     if (cr) cr << "5";
   }
   uint64_t before = peak_rss();
-  write_pack(out, m, WriteOptions{Kind::Game, body, false});
+  write_pack(out, m, WriteOptions{PackKind::Game, body, false});
   Pack p = Pack::open(out);
   CHECK(p.verify().ok);
   uint64_t after = peak_rss();
@@ -462,7 +452,7 @@ static void test_meta_install_blocks(const fs::path& tmp) {
 // A pack is written over the top of the capsule the machine is already playing.
 // Writing straight into that path empties it before the first byte of the
 // replacement is down, so a reinstall that dies on the third disc, or a recipe
-// import that dies in its rebuild, used to take the working game with it.
+// import that dies in its rebuild, would take the working game with it.
 static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   section("write_pack keeps what was there");
   fs::path dest = tmp / "keeper.kgpack";
@@ -472,7 +462,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   Meta m;
   m.id = "keeper";
   m.name = "The Installed Game";
-  write_pack(dest, m, WriteOptions{Kind::Game, body, false});
+  write_pack(dest, m, WriteOptions{PackKind::Game, body, false});
   const uint64_t was_size = fs::file_size(dest);
   const Hash was_hash = hash_file(dest);
   CHECK(Pack::open(dest).verify().ok);
@@ -482,7 +472,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   // business.
   Meta m2;
   m2.id = "keeper";
-  CHECK_THROWS(write_pack(dest, m2, WriteOptions{Kind::Game, tmp / "no-such.dwarfs", false}));
+  CHECK_THROWS(write_pack(dest, m2, WriteOptions{PackKind::Game, tmp / "no-such.dwarfs", false}));
   CHECK_EQ(fs::file_size(dest), was_size);
   CHECK_EQ(to_hex(hash_file(dest)), to_hex(was_hash));
 
@@ -495,7 +485,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   fs::path shifty("/proc/self/cmdline");
   std::error_code sec;
   if (fs::exists(shifty, sec) && fs::file_size(shifty, sec) == 0 && !sec) {
-    CHECK_THROWS(write_pack(dest, m2, WriteOptions{Kind::Game, shifty, false}));
+    CHECK_THROWS(write_pack(dest, m2, WriteOptions{PackKind::Game, shifty, false}));
     CHECK_EQ(fs::file_size(dest), was_size);
     CHECK_EQ(to_hex(hash_file(dest)), to_hex(was_hash));
     CHECK(Pack::open(dest).verify().ok);
@@ -513,7 +503,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   Meta m3;
   m3.id = "keeper";
   m3.name = "The Reinstalled Game";
-  write_pack(dest, m3, WriteOptions{Kind::Game, body, false});
+  write_pack(dest, m3, WriteOptions{PackKind::Game, body, false});
   CHECK_EQ(Pack::open(dest).meta().name, std::string("The Reinstalled Game"));
 
   fs::remove(dest, sec);
@@ -528,8 +518,8 @@ static void test_absurd_meta_len_is_refused(const fs::path& tmp) {
   constexpr uint64_t kClaimed = 200ull << 20;
 
   Header h;
-  h.kind = Kind::Game;
-  h.meta_off = kHeaderSize;
+  h.kind = PackKind::Game;
+  h.meta_off = kPackHeaderSize;
   h.meta_len = kClaimed;
   fs::path liar = tmp / "greedy.kgpack";
   write_file(liar, h.serialize());
@@ -537,7 +527,7 @@ static void test_absurd_meta_len_is_refused(const fs::path& tmp) {
   // without this test writing a quarter of a gigabyte. Without the bound the
   // reader believes the claim, because the only gate it had was the file size.
   std::error_code ec;
-  fs::resize_file(liar, kHeaderSize + kClaimed, ec);
+  fs::resize_file(liar, kPackHeaderSize + kClaimed, ec);
   if (ec) {
     std::fprintf(stderr, "  skipped: cannot make a sparse file in %s\n", tmp.c_str());
     return;
@@ -634,7 +624,7 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
   hostile.id = "../../../.config/autostart/kretro";
   hostile.name = "Classic 2";
   fs::path bad_id = tmp / "hostile-id.kgpack";
-  write_pack(bad_id, hostile, WriteOptions{Kind::Game, std::nullopt, false});
+  write_pack(bad_id, hostile, WriteOptions{PackKind::Game, std::nullopt, false});
   CHECK_THROWS(Pack::open(bad_id));
   CHECK_THROWS(Meta::decode(hostile.encode()));
 
@@ -655,7 +645,7 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
   escaping.id = "adventure2";
   escaping.install.install_dir = "../../../../../../.bashrc";
   fs::path bad_dir = tmp / "hostile-install-dir.kgpack";
-  write_pack(bad_dir, escaping, WriteOptions{Kind::Game, std::nullopt, false});
+  write_pack(bad_dir, escaping, WriteOptions{PackKind::Game, std::nullopt, false});
   CHECK_THROWS(Pack::open(bad_dir));
 
   // The ordinary pack this one is a forgery of still opens, with both strings
@@ -664,7 +654,7 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
   ok.id = "adventure2";
   ok.install.install_dir = "Program Files/Adventure II";
   fs::path fine = tmp / "ordinary.kgpack";
-  write_pack(fine, ok, WriteOptions{Kind::Game, std::nullopt, false});
+  write_pack(fine, ok, WriteOptions{PackKind::Game, std::nullopt, false});
   Pack p = Pack::open(fine);
   CHECK_EQ(p.meta().id, std::string("adventure2"));
   CHECK_EQ(p.meta().install.install_dir, std::string("Program Files/Adventure II"));
@@ -677,7 +667,7 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
 
 // The count in front of a CBOR container is the writer's claim and nothing has
 // been read to back it. sizeof(cbor::Value) is 112 bytes, so reserving on the
-// claim is a hundredfold amplifier: a couple of megabytes of pack used to ask
+// claim is a hundredfold amplifier: a couple of megabytes of pack would ask
 // for a couple of hundred, and get them, before the item budget refused it.
 static void test_an_absurd_container_count_allocates_nothing() {
   section("absurd container count");
@@ -727,8 +717,8 @@ static void test_an_absurd_container_count_allocates_nothing() {
   CHECK_EQ(v.arr[3999].uint_or(), 3999u);
 }
 
-// body_off and body_len are two more numbers a stranger wrote, and the check
-// that they stay inside the file used to add them together in 64 bits. 4096
+// body_off and body_len are two more numbers a stranger wrote, and a check
+// that they stay inside the file must not add them together in 64 bits. 4096
 // plus 2^64-4096 is zero, and zero is inside every file there has ever been.
 static void test_an_overflowing_body_length_is_refused(const fs::path& tmp) {
   section("overflowing body length");
@@ -737,7 +727,7 @@ static void test_an_overflowing_body_length_is_refused(const fs::path& tmp) {
   fs::path good = tmp / "overflow.kgpack";
   Meta m;
   m.id = "dash3";
-  write_pack(good, m, WriteOptions{Kind::Game, body, false});
+  write_pack(good, m, WriteOptions{PackKind::Game, body, false});
   CHECK(Pack::open(good).verify().ok);
 
   // Byte 32 is body_off and byte 40 is body_len, both little-endian.
@@ -773,6 +763,213 @@ static void test_an_overflowing_body_length_is_refused(const fs::path& tmp) {
   fs::remove(absurd, ec);
   fs::remove(good, ec);
   fs::remove(body, ec);
+}
+
+// ---- golden bytes -------------------------------------------------------------
+//
+// The exact bytes today's encoders write, pinned so that moving the code that
+// writes them can be shown to change nothing on disk. Every input is fixed:
+// no clock, no path of this machine's, no hash of anything that varies. A
+// mismatch here is a format change, and a refactor must never make one.
+
+// 32 consecutive byte values from `start`: fixed, and easy to find in a dump.
+static Hash golden_hash(uint8_t start) {
+  Hash h{};
+  for (size_t i = 0; i < h.size(); ++i) h[i] = static_cast<uint8_t>(start + i);
+  return h;
+}
+
+static void test_golden_header() {
+  section("golden: the pack header");
+  Header h;
+  h.flags = kHasBody;
+  h.kind = PackKind::Game;
+  h.meta_off = 96;
+  h.meta_len = 0x1234;
+  h.body_off = 4096;
+  h.body_len = 20000;
+  h.blake3_root = golden_hash(0x20);
+  const std::string want =
+      "4b475041434b00020100010001000000600000000000000034120000000000000010000000000000204e000000000000"
+      "00000000000000000000000000000000202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+  CHECK_EQ(kgtest::to_hex(h.serialize()), want);
+}
+
+// Every field set, and none to its default, so that a field that stops being
+// written, or is written in another place, changes the bytes.
+static Meta golden_meta() {
+  Meta m;
+  m.id = "example-game";
+  m.name = "Example Game";
+  m.developer = "Example Developer";
+  m.publisher = "Example Publisher";
+  m.year = 1999;
+  m.layout = "rooted";
+  m.recipe.method = "installer_exe";
+  m.recipe.member = "setup/data.cab";
+  m.recipe.subdir = "GAME";
+  m.recipe.setup = "SETUP.EXE";
+  m.recipe.setup_ref = "example.zip#DEMO_DISC";
+  m.recipe.discs = {"example.zip#DEMO_DISC", "example.zip#DEMO_DISC2"};
+  m.recipe.verify = {"GAME.EXE"};
+  DiscFingerprint fp;
+  fp.filename = "example.iso";
+  fp.size = 734003200;
+  fp.blake3 = golden_hash(0x01);
+  fp.volume_id = "DEMO_DISC";
+  fp.created = "1999-01-02 03:04:05";
+  fp.anchors.push_back(Anchor{"SETUP.EXE", 12345, golden_hash(0x02)});
+  m.recipe.fingerprints.push_back(fp);
+  m.run.exe = "GAME.EXE";
+  m.run.args = "-window";
+  m.run.windows_version = "win98";
+  m.run.width = 640;
+  m.run.height = 480;
+  m.runtime.id = "wine-10";
+  m.runtime.blake3 = golden_hash(0x03);
+  m.runtime.dlloverrides = "ddraw=n,b";
+  m.runtime.winetricks = {"d3dx9", "vcrun6"};
+  m.runtime.dgvoodoo = true;
+  m.present.dar = "16:10";
+  m.present.pause_on_blur = false;
+  m.install.install_dir = "Program Files/Example Game";
+  m.registry.fragment = "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\Example]\n\"Path\"=\"C:\\\\Game\"\n";
+  m.system.files = 3;
+  m.system.bytes = 5000000000ull;
+  m.input = {{"start", "Escape"}, {"a", "Return"}};
+  m.discs.push_back(Meta::Disc{"DEMO_DISC", 0x12345678, "example.zip#DEMO_DISC", "/discs/example.iso", true});
+  m.discs.push_back(Meta::Disc{"DEMO_DISC2", 7, "example.zip#DEMO_DISC2", "", false});
+  m.body.length = 20000;
+  m.body.blake3 = golden_hash(0x04);
+  m.tree = Tree::from_canonical("000081a4 0000000000000010 " + to_hex(golden_hash(0x50)) + " GAME.EXE\n" +
+                                "000041ed 0000000000000000 " + to_hex(golden_hash(0x60)) + " data\n" +
+                                "000081a4 0000000000000400 " + to_hex(golden_hash(0x40)) + " data/level1.dat\n");
+  return m;
+}
+
+static void test_golden_meta() {
+  section("golden: pack metadata, with and without body.packing");
+  Meta m = golden_meta();
+  const std::string plain =
+      "b06269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf666c61796f"
+      "757466726f6f7465646377686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c69"
+      "73686572714578616d706c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f"
+      "657865666d656d6265726e73657475702f646174612e636162667375626469726447414d456573657475706953455455"
+      "502e4558456973657475705f726566756578616d706c652e7a69702344454d4f5f444953436564697363738275657861"
+      "6d706c652e7a69702344454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679"
+      "816847414d452e4558456c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473"
+      "697a651a2bc0000066626c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      "2069766f6c756d655f69646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a30"
+      "3567616e63686f727381a364706174686953455455502e4558456473697a6519303966626c616b653358200203040506"
+      "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e455845646172"
+      "6773672d77696e646f776f77696e646f77735f76657273696f6e6577696e393865776964746819028066686569676874"
+      "1901e06772756e74696d65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112"
+      "131415161718191a1b1c1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e6574726963"
+      "6b738265643364783966766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d7061"
+      "7573655f6f6e5f626c7572f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c6573"
+      "2f4578616d706c652047616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45"
+      "595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c4761"
+      "6d65220a6673797374656da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475"
+      "726e657374617274664573636170656664697363733282a5656c6162656c6944454d4f5f444953436673657269616c1a"
+      "1234567863726566756578616d706c652e7a69702344454d4f5f4449534366736f75726365722f64697363732f657861"
+      "6d706c652e69736f68656d626564646564f5a5656c6162656c6a44454d4f5f44495343326673657269616c0763726566"
+      "766578616d706c652e7a69702344454d4f5f444953433266736f757263656068656d626564646564f464626f6479a266"
+      "6c656e677468194e2066626c616b653358200405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+      "2223647472656579012f3030303038316134203030303030303030303030303030313020353035313532353335343535"
+      "353635373538353935613562356335643565356636303631363236333634363536363637363836393661366236633664"
+      "366536662047414d452e4558450a30303030343165642030303030303030303030303030303030203630363136323633"
+      "363436353636363736383639366136623663366436653666373037313732373337343735373637373738373937613762"
+      "376337643765376620646174610a30303030383161342030303030303030303030303030343030203430343134323433"
+      "343434353436343734383439346134623463346434653466353035313532353335343535353635373538353935613562"
+      "356335643565356620646174612f6c6576656c312e6461740a";
+  CHECK_EQ(kgtest::to_hex(m.encode()), plain);
+
+  m.body.packing = kBodyPacking;
+  const std::string packed =
+      "b06269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf666c61796f"
+      "757466726f6f7465646377686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c69"
+      "73686572714578616d706c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f"
+      "657865666d656d6265726e73657475702f646174612e636162667375626469726447414d456573657475706953455455"
+      "502e4558456973657475705f726566756578616d706c652e7a69702344454d4f5f444953436564697363738275657861"
+      "6d706c652e7a69702344454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679"
+      "816847414d452e4558456c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473"
+      "697a651a2bc0000066626c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      "2069766f6c756d655f69646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a30"
+      "3567616e63686f727381a364706174686953455455502e4558456473697a6519303966626c616b653358200203040506"
+      "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e455845646172"
+      "6773672d77696e646f776f77696e646f77735f76657273696f6e6577696e393865776964746819028066686569676874"
+      "1901e06772756e74696d65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112"
+      "131415161718191a1b1c1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e6574726963"
+      "6b738265643364783966766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d7061"
+      "7573655f6f6e5f626c7572f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c6573"
+      "2f4578616d706c652047616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45"
+      "595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c4761"
+      "6d65220a6673797374656da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475"
+      "726e657374617274664573636170656664697363733282a5656c6162656c6944454d4f5f444953436673657269616c1a"
+      "1234567863726566756578616d706c652e7a69702344454d4f5f4449534366736f75726365722f64697363732f657861"
+      "6d706c652e69736f68656d626564646564f5a5656c6162656c6a44454d4f5f44495343326673657269616c0763726566"
+      "766578616d706c652e7a69702344454d4f5f444953433266736f757263656068656d626564646564f464626f6479a366"
+      "6c656e677468194e2066626c616b653358200405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+      "2223677061636b696e676e63617465676f72697a652c533232647472656579012f303030303831613420303030303030"
+      "303030303030303031302035303531353235333534353535363537353835393561356235633564356535663630363136"
+      "3236333634363536363637363836393661366236633664366536662047414d452e4558450a3030303034316564203030"
+      "303030303030303030303030303020363036313632363336343635363636373638363936613662366336643665366637"
+      "3037313732373337343735373637373738373937613762376337643765376620646174610a3030303038316134203030"
+      "303030303030303030303034303020343034313432343334343435343634373438343934613462346334643465346635"
+      "3035313532353335343535353635373538353935613562356335643565356620646174612f6c6576656c312e6461740a";
+  CHECK_EQ(kgtest::to_hex(m.encode()), packed);
+}
+
+// The input map's keys are read with text_or(), so a key that is not text
+// becomes "" rather than refusing the pack or dropping the binding. Old packs
+// may depend on that, so it has to survive the code being moved.
+static void test_golden_meta_input_key() {
+  section("golden: an input key that is not text decodes as \"\"");
+  cbor::Encoder e;
+  e.map(2);
+  e.text("id"); e.text("example-game");
+  e.text("input");
+  e.map(2);
+  e.uint_val(7); e.text("Return");
+  e.text("a"); e.uint_val(5);
+  Meta m = Meta::decode(e.data());
+  CHECK_EQ(m.input.size(), size_t{2});
+  CHECK_EQ(m.input.count(""), size_t{1});
+  CHECK_EQ(m.input.at(""), std::string("Return"));
+  CHECK_EQ(m.input.at("a"), std::string(""));
+}
+
+static void test_little_endian() {
+  section("little-endian and alignment");
+  // Least significant byte first at every width, whatever the host's order:
+  // the pack header, the table of contents and the trailer are written this way.
+  std::string s;
+  le::put_u16(s, 0xbeef);
+  CHECK_EQ(s, std::string("\xef\xbe", 2));
+  CHECK_EQ(le::get_u16(s, 0), uint16_t{0xbeef});
+  s.clear();
+  le::put_u32(s, 0x01020304u);
+  CHECK_EQ(s, std::string("\x04\x03\x02\x01", 4));
+  CHECK_EQ(le::get_u32(s, 0), uint32_t{0x01020304u});
+  s.clear();
+  le::put_u64(s, 0x0102030405060708ull);
+  CHECK_EQ(s, std::string("\x08\x07\x06\x05\x04\x03\x02\x01", 8));
+  CHECK_EQ(le::get_u64(s, 0), uint64_t{0x0102030405060708ull});
+  // Read at an offset, and with every high bit set: a byte above 0x7f must not
+  // sign-extend into the bytes above it.
+  s = "xyz";
+  le::put_u32(s, 0xfedcba98u);
+  CHECK_EQ(le::get_u32(s, 3), uint32_t{0xfedcba98u});
+  s.clear();
+  le::put_u64(s, ~0ull);
+  CHECK_EQ(le::get_u64(s, 0), ~0ull);
+
+  static_assert(align_up(4097, 4096) == 8192);
+  CHECK_EQ(align_up(0, 4096), uint64_t{0});
+  CHECK_EQ(align_up(1, 4096), uint64_t{4096});
+  CHECK_EQ(align_up(4096, 4096), uint64_t{4096});
+  CHECK_EQ(align_up(4097, 4096), uint64_t{8192});
+  CHECK_EQ(align_up(5, 1), uint64_t{5});
 }
 
 static void test_toml() {
@@ -833,9 +1030,11 @@ int main() {
     test_hash();
     test_cbor();
     test_toml();
+    test_little_endian();
     test_tree(tmp);
     test_pack_roundtrip(tmp);
     test_container_revision(tmp);
+    test_pack_kind_names();
     test_layout();
     test_streamed_body(tmp);
     test_meta_install_blocks(tmp);
@@ -845,12 +1044,13 @@ int main() {
     test_a_pack_names_nothing_outside_its_own_places(tmp);
     test_an_absurd_container_count_allocates_nothing();
     test_an_overflowing_body_length_is_refused(tmp);
+    test_golden_header();
+    test_golden_meta();
+    test_golden_meta_input_key();
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

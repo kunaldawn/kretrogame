@@ -43,12 +43,17 @@ configuration (see `tests/README.md`) and skip cleanly when it is absent.
   scratch files under `build/scratch/`.
 - Unmount every FUSE mount you create (`fusermount3 -u`). Never touch mounts you
   did not create.
+- `docs/` describes the architecture, the file formats, the build and the
+  tests; read it before changing any of them.
 
 ## Style
 
-- C++20. Format new and changed code with `.clang-format`. The existing tree is
-  not reformatted wholesale: the style keeps some deliberate multi-statement
-  lines that clang-format would break up. Comments explain *why*, in plain
-  prose.
+- C++20, formatted with `.clang-format`. A new file (or new code split into
+  its own file) is formatted in full and added to `FORMAT_CLEAN` in
+  `mk/sources.mk`; `make format-check` and CI hold those files to it. Edits to
+  any other file are formatted on the changed lines only (`git clang-format`,
+  on the host). Code moved verbatim is not reformatted, and the existing tree
+  is never reformatted wholesale: it keeps deliberate multi-statement lines
+  that clang-format would break up. Comments explain *why*, in plain prose.
 - No behaviour change inside a refactor. Keep the test counts the same or
   higher.

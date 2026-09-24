@@ -14,52 +14,13 @@
 #include "disc/drive.h"
 #include "disc/sector.h"
 #include "disc/serial.h"
-#include "install/iso.h"
+#include "disc/database.h"
+#include "disc/iso.h"
 #include "util/hash.h"
+#include "support/check.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
-
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-#define CHECK_THROWS(expr)                                                \
-  do {                                                                    \
-    ++checks;                                                             \
-    bool threw_ = false;                                                  \
-    try {                                                                 \
-      (void)(expr);                                                       \
-    } catch (const std::exception&) {                                     \
-      threw_ = true;                                                      \
-    }                                                                     \
-    if (!threw_) {                                                        \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  did not throw: %s\n", __FILE__, \
-                   __LINE__, #expr);                                      \
-    }                                                                     \
-  } while (0)
 
 static void test_msf() {
   // 75 frames to the second, and the two-second pregap every disc carries.
@@ -466,11 +427,9 @@ int main() {
     test_repoint(tmp);
     test_database_v1_and_v2(tmp);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

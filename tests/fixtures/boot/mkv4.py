@@ -10,6 +10,8 @@ files a real linker never would - an entry past the end, a table missing its
 runtime - which is most of what the test is for.
 
 Prints "toc_off toc_len" so the test can check what the bootstrap handed down.
+
+The contract it follows is docs/file-format.md.
 """
 
 import argparse

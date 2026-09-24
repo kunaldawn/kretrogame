@@ -5,21 +5,20 @@
 // `kretro key <id> <serial>` writes one down and `kretro key <id>` reads it
 // back, which is a place to keep a serial rather than a scrap of paper.
 //
-// An install used to read it here in order to type it into a box nobody was
-// watching, and that went with the automation. What reads it now is the wizard,
+// Nothing types it into a box nobody is watching. What reads it is the wizard,
 // which never types anything: its identity page offers whatever is stored under
-// the id, build.cpp's prefill_serial puts it into a draft that arrived without
+// the id, draft.cpp's prefill_serial puts it into a draft that arrived without
 // one - a recipe carries no serial, so a rebuild depends on this - and the
 // install step puts it on screen beside the installer that is asking, for a
 // person to read while they type. Keys stay on this machine and go into no
 // pack, because a serial is the user's, not the game's.
 //
-// That last sentence was not true of the registry, which is where an installer
-// writes the key the moment you have typed it: the diff was unfiltered, so the
-// serial travelled inside every capsule and every exported recipe. It is held
-// back now - registry.h's is_serial_value is the test, Build::diff_after is
-// where it is applied and says so - and a game that asks again on first run is
-// asking for something this vault is holding.
+// That holds for the registry too, which is where an installer writes the key
+// the moment you have typed it: an unfiltered diff would carry the serial
+// inside every capsule and every exported recipe. It is held back -
+// registry.h's is_serial_value is the test, Build::diff_after is where it is
+// applied and says so - and a game that asks again on first run is asking for
+// something this vault is holding.
 #pragma once
 
 #include <filesystem>

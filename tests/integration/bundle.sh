@@ -29,20 +29,20 @@
 #   KRETRO_TEST_NO_DISCS  ids to pack without their disc, for a disc that is
 #                         mostly other games
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
-[ -f tests/local.env ] && . tests/local.env
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+load_local_env
 
 BIN="$(realpath -m "${KRETRO_BIN:-build/kretro}")"
 PACKER="$(realpath -m "${KGPACK_BIN:-build/kgpack}")"
 B3="$(realpath -m "${KRETRO_B3:-build/kretro-b3}")"
 ISO_DIR="$(realpath -m "${KRETRO_ISO_DIR:-iso}")"
 
-[ -n "${KRETRO_TEST_GAMES:-}" ] || { echo "skip: no KRETRO_TEST_GAMES - set it in tests/local.env (see tests/README.md)"; exit 0; }
-[ -d "$ISO_DIR" ] || { echo "skip: no $ISO_DIR - this one needs your own discs"; exit 0; }
+[ -n "${KRETRO_TEST_GAMES:-}" ] || skip "no KRETRO_TEST_GAMES - set it in tests/local.env (see tests/README.md)"
+[ -d "$ISO_DIR" ] || skip "no $ISO_DIR - this one needs your own discs"
 for t in "$BIN" "$PACKER" "$B3"; do
-  [ -x "$t" ] || { echo "skip: no $t - run: make"; exit 0; }
+  [ -x "$t" ] || skip "no $t - run: make"
 done
-command -v python3 >/dev/null || { echo "skip: no python3 to read the table with"; exit 0; }
+command -v python3 >/dev/null || skip "no python3 to read the table with"
 
 MANIFESTS="${KRETRO_MANIFESTS:-games}"
 iso_of() { sed -n 's/^iso *= *"\(.*\)"/\1/p' "$MANIFESTS/$1.toml" 2>/dev/null | head -n 1; }
@@ -50,26 +50,17 @@ has_disc() { local iso; iso="$(iso_of "$1")"; [ -n "$iso" ] && [ -f "$ISO_DIR/$i
 GAMES=()
 read -r -a WANT <<<"$KRETRO_TEST_GAMES"
 if has_disc "${WANT[0]}"; then GAMES+=("${WANT[0]}"); else
-  echo "skip: the disc of ${WANT[0]} ($MANIFESTS/${WANT[0]}.toml) is not in $ISO_DIR"; exit 0; fi
+  skip "the disc of ${WANT[0]} ($MANIFESTS/${WANT[0]}.toml) is not in $ISO_DIR"; fi
 for id in "${WANT[@]:1}"; do has_disc "$id" && GAMES+=("$id"); done
 
-FAIL=0
-ok()   { printf '  ok    %s\n' "$1"; }
-bad()  { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL+1)); }
-note() { printf '  --    %s\n' "$1"; }
 show() { sed 's/^/        /' "$1" | tail -n "${2:-15}"; }
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/kretro-bundle.XXXXXX")"
+# Every mount made here is under $WORK: our_mounts finds them, and they are
+# all taken down before it is removed.
+scratch bundle
+WORK="$SCRATCH"
 mkdir -m 700 "$WORK/run"
-# Our mounts are the ones under $WORK, and only those are touched. Innermost
-# first, so an overlay goes before the image under it.
-our_mounts() { awk -v w="$WORK" 'index($2, w "/") == 1 { print $2 }' /proc/self/mounts | awk '{ print length, $0 }' |
-               sort -rn | cut -d' ' -f2-; }
-cleanup() {
-  our_mounts | while read -r m; do fusermount3 -u "$m" 2>/dev/null || fusermount3 -u -z "$m" 2>/dev/null; done
-  rm -rf "$WORK"
-}
-trap cleanup EXIT
+scratch_cleanup() { unmount_ours; }
 
 export XDG_RUNTIME_DIR="$WORK/run"
 export KRETRO_ISO_DIR="$ISO_DIR"
@@ -98,7 +89,7 @@ for id in "${GAMES[@]}"; do
     ok "$id installs headless ($(du -h "$WORK/shelf/games/$id.kgpack" | cut -f1))"
   else
     bad "$id did not install"; show "$WORK/install-$id.log"
-    printf 'failed %d\n' "$FAIL"; exit 1
+    finish; exit 1
   fi
 done
 
@@ -117,7 +108,7 @@ if author bundle build -o "$PLAYER" --id kretro-bundle-test --title "kretro bund
   ok "kretro bundle build wrote $(basename "$PLAYER") ($(du -h "$PLAYER" | cut -f1))"
 else
   bad "kretro bundle build failed"; show "$WORK/build.log"
-  printf 'failed %d\n' "$FAIL"; exit 1
+  finish; exit 1
 fi
 # -o names the file, so the build is written as that name's .partial; and
 # none of any name, from either build, is left.
@@ -151,7 +142,7 @@ for i in range(int.from_bytes(toc[8:12], "little")):
     print(kinds.get(k, "kind%d" % k), name, int.from_bytes(r[8:16], "little"),
           int.from_bytes(r[16:24], "little"), r[24:56].hex())
 EOF
-[ -s "$WORK/toc.txt" ] || { bad "the table could not be read: $(cat "$WORK/toc.err")"; printf 'failed %d\n' "$FAIL"; exit 1; }
+[ -s "$WORK/toc.txt" ] || { bad "the table could not be read: $(cat "$WORK/toc.err")"; finish; exit 1; }
 
 is_kinds="$(cut -d' ' -f1 "$WORK/toc.txt" | paste -sd' ')"
 want_kinds="tools runtime app meta$(printf ' pack%.0s' "${GAMES[@]}")"
@@ -286,5 +277,4 @@ left="$(our_mounts | grep -v '/kretro/rt-' || true)"
 [ -z "$left" ] && ok "nothing of a game is left mounted" || bad "left mounted: $left"
 note "runtime mounts to take down on the way out: $(our_mounts | wc -l)"
 
-printf 'failed %d\n' "$FAIL"
-[ "$FAIL" -eq 0 ]
+finish

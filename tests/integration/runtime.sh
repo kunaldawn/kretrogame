@@ -17,31 +17,29 @@
 # Wants `make runtime` first, and docker for the Wine half. Needs about 3 GB of
 # scratch space; set TMPDIR to move it.
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 BUILD="${BUILD:-build}"
 TOOL="$BUILD/dwarfs-universal"
 
-PASS=0; FAIL=0
-ok()  { printf '  \033[32mok\033[0m    %s\n' "$1"; PASS=$((PASS+1)); }
-bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
-check() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$label"; else bad "$label"; fi; }
+# What a check runs here says nothing worth reading; only its verdict counts.
+CHECK_QUIET=1
 absent() { local label="$1"; shift; local p; for p in "$@"; do
              if [ -e "$p" ] || [ -L "$p" ]; then bad "$label ($p is there)"; return; fi
            done; ok "$label"; }
 
-[ -x "$TOOL" ] || { echo "skip: no $TOOL - run: make runtime"; exit 0; }
+[ -x "$TOOL" ] || skip "no $TOOL - run: make runtime"
 only="${1:-}"
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/kretro-runtime-test.XXXXXX")"
+scratch runtime-test
 # The extracted trees hold read-only directories, and the Wine half writes
 # through docker as this user; both have to be made removable first.
-trap 'chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
+scratch_cleanup() { chmod -R u+w "$SCRATCH" 2>/dev/null; }
 
 one() {
   local profile="$1" image="$2"
   [ -z "$only" ] || [ "$only" = "$profile" ] || return 0
   if [ ! -f "$BUILD/$image" ]; then echo "skip: no $BUILD/$image"; return 0; fi
   echo "$profile runtime  ($(du -h "$BUILD/$image" | cut -f1) packed)"
-  local rt="$scratch/$profile"
+  local rt="$SCRATCH/$profile"
   mkdir -p "$rt"
   if ! "$TOOL" --tool=dwarfsextract -i "$BUILD/$image" -o "$rt" --log-level=error 2>&1; then
     bad "unpacks"; return
@@ -152,7 +150,7 @@ EOF
     if [ -d games ]; then
       check "the wizard's manifests, from games/" test -d "$rt/usr/share/kretro/games"
     else
-      printf '  --    no games/ here, so no manifests to look for\n'
+      note "no games/ here, so no manifests to look for"
     fi
   fi
 
@@ -216,5 +214,4 @@ EOF
 one kretro runtime.dwarfs
 one player player-runtime.dwarfs
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ]
+finish

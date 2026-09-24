@@ -69,6 +69,15 @@ std::string redact(const std::string& text);
 // The last `n` lines of a file, or empty.
 std::string tail_lines(const std::filesystem::path& file, size_t n);
 
+// Writes redact(text) to `to`: what --save does with a rendered report. False
+// when the file could not be written; the caller says so in its own words.
+bool save_redacted(const std::string& text, const std::filesystem::path& to);
+
+// The candidate with the newest modification time, or empty when none of them
+// exists. A candidate that does not exist is skipped, and of two with the same
+// time the earlier in the list wins.
+std::filesystem::path newest_file(const std::vector<std::filesystem::path>& candidates);
+
 // Runs the runtime's own vulkaninfo and glxinfo, under `e` - which must carry
 // the GPU routing a game would get, or the answer is about a different driver.
 gpu::Probes runtime_probes(const rt::Env& e);

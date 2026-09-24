@@ -12,14 +12,15 @@
 //      own offset of its body, with a capped DwarFS cache - or, on a machine
 //      the bootstrap found cannot mount, plays the copy unpacked with consent;
 //   3. makes the game's prefix from the runtime's template, or upgrades it;
-//   4. hands the rest to session::play, with the backend chosen from the
-//      author's setting, the game's imports and this machine.
+//   4. hands the rest to session::play (session/play.cpp), with the backend
+//      chosen from the author's setting, the game's imports and this machine.
 //
 // What it never does: use the network, install anything, need root, or write
 // anywhere but its state, its cache, and - asked first - the two desktop
 // entry files.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -35,23 +36,18 @@
 #include "../gpu/probe.h"
 #include "../pack/kgpack.h"
 #include "../rt/env.h"
-#include "../session/session.h"
+#include "../session/lock.h"
+#include "../session/play.h"
+#include "../session/unpack.h"
+#include "bundle_file.h"
 #include "doctor.h"
 #include "prefix.h"
-#include "state.h"
+#include "settings.h"
+#include "state_dir.h"
+#include "unpack.h"
+#include "verify_memo.h"
 
 namespace kg::player {
-
-// A pack's bytes are not the bytes the table says they are.
-class Damaged : public std::runtime_error {
- public:
-  Damaged(const std::string& game, const std::string& what)
-      : std::runtime_error(what), game_(game) {}
-  const std::string& game() const { return game_; }
-
- private:
-  std::string game_;
-};
 
 // The DwarFS block cache a player gives each game's mount. DwarFS's own
 // default is half a gigabyte; a player runs on machines nobody measured, and
@@ -65,68 +61,7 @@ inline constexpr const char* kSourceNote =
     "release that built this player, as the exact tarballs SOURCES.txt names. SOURCES.txt, in "
     "the list below, also says where each part's upstream source lives.";
 
-struct Bundle {
-  std::filesystem::path self;
-  bundle::Toc toc;
-  bundle::BundleMeta meta;
-
-  // Reads `self`'s table and its bundle.meta. `toc_env` is KRETRO_TOC as the
-  // bootstrap set it ("off:len"); when given, it must agree with the table
-  // read here, or the file changed under us. Throws with a message a person
-  // can act on.
-  static Bundle open(const std::filesystem::path& self, const std::string& toc_env = "");
-
-  const bundle::GameMeta* game(const std::string& id) const;
-  const bundle::Entry* pack(const std::string& id) const;
-  // "example-game, other-game" for a message about a game that is not here.
-  std::string game_list() const;
-};
-
-// Decides the state directory and puts it where every later path lookup will
-// find it: KRETRO_STATE, and the bundle layout. Called before anything else
-// asks where anything is; paths resolve state_dir() once.
-StateChoice settle_state(const Bundle& b, const std::filesystem::path& exe);
-
-// The same, for the helper a session starts beside a game - the gamepad's.
-// It is this program again, exec'd straight from the runtime rather than
-// through the bootstrap, with the game's environment: HOME is the game's own
-// home by then, and choosing afresh would find a state under it. The player
-// that started the game handed its choice down as KRETRO_STATE, and that is
-// the one taken; without it, this is settle_state.
-StateChoice inherited_state(const Bundle& b, const std::filesystem::path& exe);
-
-// The gamepad bindings the helper gives a game: the pack's own [input], with
-// the author's map from bundle.meta - bundle::parse_gamepad of what the
-// Bundles page wrote - over it when the game's Controls say "author".
-// "kretro" is the pack's own alone. Buttons neither names keep the helper's
-// defaults.
-std::map<std::string, std::string> gamepad_bindings(const std::map<std::string, std::string>& pack_input,
-                                                    const bundle::GameMeta& g, const GameSettings& s);
-
-// The warnings of the silent check not yet shown on this machine, each marked
-// as shown in `seen`, which the caller saves. Once each, ever, wherever it is
-// said - the launcher's window or a terminal's `play` - since a warning true
-// of a machine today is true of it tomorrow, and said at every start it
-// teaches a person to look past what the player says.
-std::vector<std::string> unseen_warnings(const doctor::Report& rep, LauncherState& seen);
-
-// What unpacking a game would take, on a machine that cannot mount it.
-struct UnpackPlan {
-  bool ready = false;              // already unpacked here, and it is this pack
-  std::filesystem::path where;
-  uint64_t need = 0;               // bytes, the peak: the copy and the tree
-  uint64_t free = 0;               // bytes free where it would go
-  bool fits() const { return free >= need; }
-};
-
-// An upper estimate of a pack's unpacked size: the game tree, what the
-// installer put outside it, and each carried disc at its image's size.
-uint64_t unpacked_estimate(const Meta& m);
-// Free bytes on the filesystem that holds `p`, or its nearest ancestor that
-// exists.
-uint64_t free_bytes(const std::filesystem::path& p);
-
-struct PlayRequest {
+struct PlayOverrides {
   bool dry_run = false;
   uint32_t panel_w = 0, panel_h = 0;
   bool fullscreen_set = false, fullscreen = false;
@@ -170,7 +105,7 @@ class Player {
   // Steps 2 to 4. Throws session::NeedsUnpack when the game must be unpacked
   // first and has not been; Damaged; or std::runtime_error with the reason,
   // refusals included.
-  session::Outcome play(const std::string& id, const PlayRequest& req) const;
+  session::Outcome play(const std::string& id, const PlayOverrides& ov) const;
 
   std::filesystem::path export_saves(const std::string& id, const std::filesystem::path& out) const;
   void import_saves(const std::string& id, const std::filesystem::path& in) const;

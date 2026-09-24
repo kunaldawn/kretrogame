@@ -18,10 +18,6 @@ namespace kg::install {
 // Writes <id>.recipe.kgpack: everything except the game's bytes. Kilobytes.
 std::filesystem::path export_recipe(const std::string& id, const std::filesystem::path& out);
 
-// Writes a kind=3 pack holding only what the game wrote - saves, configs.
-std::filesystem::path export_saves(const std::string& id, const std::filesystem::path& out,
-                                   const rt::Env& e);
-
 struct ImportResult {
   std::string id, name;
   bool had_body = false;   // a capsule, so nothing had to be rebuilt
@@ -29,10 +25,6 @@ struct ImportResult {
   bool root_matched = false;
   std::filesystem::path pack;
 };
-
-// Restores what a game wrote, from a saves pack. What is there now is
-// snapshotted first, so this is reversible.
-void import_saves(const std::string& id, const std::filesystem::path& in);
 
 // `replace` overwrites a game of the same id that is already installed. The
 // page that offers it says what it would replace first, including how much

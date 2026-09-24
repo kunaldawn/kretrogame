@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 
+#include "../gpu/probe.h"
 #include "../util/paths.h"
 
 namespace kg::rt {
@@ -24,6 +25,19 @@ void Env::set(const std::string& key, const std::string& value) {
     }
   }
   vars.emplace_back(key, value);
+}
+
+std::string Env::get(const std::string& key) const {
+  std::string value;
+  for (const auto& kv : vars) {
+    if (kv.first == key) value = kv.second;
+  }
+  return value;
+}
+
+void Env::append(const std::string& key, const std::string& value, char sep) {
+  const std::string cur = get(key);
+  set(key, cur.empty() ? value : cur + sep + value);
 }
 
 fs::path find_wine(const fs::path& root) {
@@ -144,6 +158,9 @@ Env make(const gpu::Report* gl) {
   return e;
 }
 
+namespace {
+
+// True for a real ELF; false for a shell script or anything else.
 bool is_elf(const fs::path& p) {
   std::FILE* f = std::fopen(p.c_str(), "rb");
   if (!f) return false;
@@ -152,6 +169,8 @@ bool is_elf(const fs::path& p) {
   std::fclose(f);
   return n == 4 && std::memcmp(m, "\x7f" "ELF", 4) == 0;
 }
+
+}  // namespace
 
 // The interpreter a #! line names, remapped into the runtime. Returns an empty
 // path for a binary, or when the script names an interpreter we do not carry.
@@ -257,14 +276,25 @@ static std::vector<std::string> loader_argv(const Env& e, const fs::path& prog,
   return v;
 }
 
+namespace {
+
+// What run and run_unnamed check first: a runtime, its loader and the program.
+// When one is missing, says so in `r` and returns false.
+bool runnable(const Env& e, const fs::path& prog, ProcResult* r) {
+  std::error_code ec;
+  if (!e.valid() || !fs::exists(e.loader(), ec) || !fs::exists(prog, ec)) {
+    r->out = "not present in this runtime: " + prog.string();
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 ProcResult run(const Env& e, const fs::path& prog, const std::vector<std::string>& args,
                ProcOptions opt) {
   ProcResult r;
-  std::error_code ec;
-  if (!e.valid() || !fs::exists(e.loader(), ec) || !fs::exists(prog, ec)) {
-    r.out = "not present in this runtime: " + prog.string();
-    return r;
-  }
+  if (!runnable(e, prog, &r)) return r;
   for (const auto& kv : e.vars) opt.env.push_back(kv);
   return kg::run(loader_argv(e, prog, args), opt);
 }
@@ -272,11 +302,7 @@ ProcResult run(const Env& e, const fs::path& prog, const std::vector<std::string
 ProcResult run_unnamed(const Env& e, const fs::path& prog, const std::vector<std::string>& args,
                        ProcOptions opt) {
   ProcResult r;
-  std::error_code ec;
-  if (!e.valid() || !fs::exists(e.loader(), ec) || !fs::exists(prog, ec)) {
-    r.out = "not present in this runtime: " + prog.string();
-    return r;
-  }
+  if (!runnable(e, prog, &r)) return r;
   // Linux 6.3 added MFD_EXEC, and a kernel with vm.memfd_noexec=1 makes a
   // memfd not executable unless asked; older kernels refuse the flag, and
   // every memfd of theirs is executable anyway. Close-on-exec is fine for an
@@ -340,6 +366,7 @@ void exec(const Env& e, const fs::path& prog, const std::vector<std::string>& ar
 
   std::vector<std::string> owned = loader_argv(e, prog, args);
   std::vector<char*> argv;
+  argv.reserve(owned.size() + 1);
   for (std::string& s : owned) argv.push_back(s.data());
   argv.push_back(nullptr);
   execv(owned[0].c_str(), argv.data());
@@ -353,6 +380,13 @@ void confine_home(Env& e, const fs::path& home) {
   e.set("XDG_DATA_HOME", (home / ".local" / "share").string());
   e.set("XDG_CACHE_HOME", (home / ".cache").string());
   e.set("XDG_STATE_HOME", (home / ".local" / "state").string());
+}
+
+Env wine_env(const Env& base, const fs::path& prefix, const fs::path& home) {
+  Env we = base;
+  we.set("WINEPREFIX", prefix.string());
+  confine_home(we, home);
+  return we;
 }
 
 }  // namespace kg::rt

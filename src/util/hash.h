@@ -6,15 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 
 namespace kg {
 
 using Hash = std::array<uint8_t, 32>;
-
-// A hash of nothing; distinct from any real content hash.
-Hash hash_zero();
 
 Hash hash_bytes(const void* data, size_t len);
 Hash hash_string(std::string_view s);
@@ -46,7 +44,7 @@ class Hasher {
 
  private:
   struct Impl;
-  Impl* impl_;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace kg

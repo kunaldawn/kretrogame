@@ -4,20 +4,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "../util/text.h"
+
 namespace kg::disc {
 namespace {
-
-std::string trim(std::string_view s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  if (a == std::string_view::npos) return {};
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return std::string(s.substr(a, b - a + 1));
-}
-
-std::string upper(std::string s) {
-  for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  return s;
-}
 
 // A cue sheet quotes any filename with a space in it, and most rippers quote
 // unconditionally. Take the quoted span when there is one, the first word
@@ -37,7 +27,7 @@ std::string quoted_or_first_word(const std::string& rest) {
 }
 
 TrackMode mode_from(const std::string& s) {
-  std::string u = upper(s);
+  std::string u = to_upper(s);
   if (u == "AUDIO") return TrackMode::Audio;
   if (u == "MODE1/2048") return TrackMode::Mode1_2048;
   if (u == "MODE1/2352") return TrackMode::Mode1_2352;
@@ -98,7 +88,7 @@ CueSheet parse_cue(std::string_view text) {
     std::istringstream ls(t);
     std::string word;
     ls >> word;
-    std::string key = upper(word);
+    std::string key = to_upper(word);
     std::string rest = trim(t.substr(word.size()));
 
     if (key == "FILE") {

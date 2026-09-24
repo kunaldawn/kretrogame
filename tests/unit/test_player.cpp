@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -27,74 +28,33 @@
 #include "rt/env.h"
 #include "player/cli.h"
 #include "player/desktop.h"
+#include "player/doctor.h"
 #include "player/player.h"
 #include "player/prefix.h"
-#include "player/state.h"
+#include "player/settings.h"
+#include "player/state_dir.h"
+#include "player/unpack.h"
+#include "player/verify_memo.h"
+#include "session/input_helper.h"
+#include "session/prefix.h"
 #include "util/paths.h"
 #include "util/proc.h"
+#include "support/bundle_fixtures.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
 using player::Command;
 using player::PrefixAction;
 
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-#define CHECK_THROWS(expr)                                                             \
-  do {                                                                                 \
-    ++checks;                                                                          \
-    bool threw_ = false;                                                               \
-    try {                                                                              \
-      (void)(expr);                                                                    \
-    } catch (const std::exception&) {                                                  \
-      threw_ = true;                                                                   \
-    }                                                                                  \
-    if (!threw_) {                                                                     \
-      ++failures;                                                                      \
-      std::fprintf(stderr, "  FAIL %s:%d  did not throw: %s\n", __FILE__, __LINE__, #expr); \
-    }                                                                                  \
-  } while (0)
-
-static bool contains(const std::string& s, const std::string& what) {
-  return s.find(what) != std::string::npos;
-}
-
-static void section(const char* name) { std::fprintf(stderr, "%s\n", name); }
-
-static void write(const fs::path& p, const std::string& s) {
-  fs::create_directories(p.parent_path());
-  std::ofstream(p, std::ios::binary) << s;
-}
-
-static std::string slurp(const fs::path& p) {
-  std::ifstream f(p, std::ios::binary);
-  std::stringstream ss;
-  ss << f.rdbuf();
-  return ss.str();
-}
+using kgtest::contains;
+using kgtest::flip_byte;
+using kgtest::make_base;
+using kgtest::make_pack;
+using kgtest::section;
+using kgtest::slurp;
+using kgtest::write_file;
 
 // ---- state ------------------------------------------------------------------
 
@@ -102,7 +62,7 @@ static void test_state_choice(const fs::path& tmp) {
   section("state: portable beside the file, else XDG, and a read-only portable falls back");
   fs::path dir = tmp / "stick";
   fs::path exe = dir / "classics.run";
-  write(exe, "ELF");
+  write_file(exe, "ELF");
 
   // No portable directory: XDG_DATA_HOME, keyed by the bundle id.
   player::StateChoice c = player::choose_state(exe, "retro-shelf", "/xdg/data", "/home/kim");
@@ -127,7 +87,7 @@ static void test_state_choice(const fs::path& tmp) {
 
   // A file of that name is not a directory, and is not taken for one.
   fs::path exe2 = dir / "other.run";
-  write(dir / "other.run-data", "not a directory");
+  write_file(dir / "other.run-data", "not a directory");
   CHECK_EQ(player::choose_state(exe2, "b", "/x", "/h").dir, fs::path("/x/b"));
 
   // Read-only: XDG, and the refused directory is named so it can be said.
@@ -243,9 +203,9 @@ static void test_launcher_and_settings(const fs::path& tmp) {
   CHECK(!fs::exists(f.string() + ".tmp"));
 
   // A file somebody broke is a fresh start, not a player that will not open.
-  write(f, "[window\nwidth = = =\n");
+  write_file(f, "[window\nwidth = = =\n");
   CHECK(!player::load_launcher(f).desktop_offered);
-  write(f, "[window]\nwidth = 5\n");  // absurd: the default, not a 5-pixel window
+  write_file(f, "[window]\nwidth = 5\n");  // absurd: the default, not a 5-pixel window
   CHECK_EQ(player::load_launcher(f).window_w, 1280u);
 
   // Settings: the author's defaults until the person changes one.
@@ -266,7 +226,7 @@ static void test_launcher_and_settings(const fs::path& tmp) {
   CHECK_EQ(got.display.scale, 3u);
   CHECK(!got.fullscreen);
   CHECK_EQ(got.gamepad, std::string("kretro"));
-  write(sf, "[controls]\ngamepad = \"joystick-of-legend\"\n");
+  write_file(sf, "[controls]\ngamepad = \"joystick-of-legend\"\n");
   CHECK_EQ(player::load_game_settings(sf, d).gamepad, std::string("author"));
 
   // Two copies of a player on one state write the same files - two
@@ -299,6 +259,58 @@ static void test_launcher_and_settings(const fs::path& tmp) {
     ++left;
   }
   CHECK_EQ(left, size_t{1});
+}
+
+// The exact text launcher.toml and settings.toml are written as, pinned so
+// that moving the code that writes them (toml_string among it) can be shown to
+// change nothing in a player's state directory.
+static void test_golden_state_files(const fs::path& tmp) {
+  section("state: launcher.toml and settings.toml, byte for byte");
+  player::LauncherState s;
+  s.window_w = 1600;
+  s.window_h = 900;
+  s.window_fullscreen = true;
+  s.desktop_offered = true;
+  s.desktop_installed = false;
+  s.portable_fallback_said = true;
+  // Not warning_key()s, which are hashes: two entries that make toml_string
+  // escape a tab, a quote and a backslash.
+  s.warnings_seen = {"b\"q\\x", "a\tb"};
+  fs::path f = tmp / "golden" / "launcher.toml";
+  player::save_launcher(f, s);
+  const std::string launcher =
+      "# The launcher's memory. Safe to delete: it only means being asked again.\n"
+      "\n"
+      "[window]\n"
+      "width = 1600\n"
+      "height = 900\n"
+      "fullscreen = true\n"
+      "\n"
+      "[desktop]\n"
+      "offered = true\n"
+      "installed = false\n"
+      "\n"
+      "[notes]\n"
+      "portable_fallback_said = true\n"
+      "warnings_seen = [\"a\\tb\", \"b\\\"q\\\\x\"]\n";
+  CHECK_EQ(slurp(f), launcher);
+
+  player::GameSettings g;
+  g.display.mode = config::ScaleMode::Native;
+  g.display.scale = 3;
+  g.fullscreen = true;
+  g.gamepad = "kretro";
+  fs::path sf = tmp / "golden" / "settings.toml";
+  player::save_game_settings(sf, g);
+  const std::string settings =
+      "[display]\n"
+      "mode = \"native\"\n"
+      "scale = 3\n"
+      "fullscreen = true\n"
+      "\n"
+      "[controls]\n"
+      "gamepad = \"kretro\"\n";
+  CHECK_EQ(slurp(sf), settings);
 }
 
 static void test_warnings_once(const fs::path& tmp) {
@@ -370,10 +382,10 @@ static void test_prefix_decision() {
 static void test_prefix_seed(const fs::path& tmp) {
   section("prefix: a seed is a writable copy with c: and no z:");
   fs::path t = tmp / "template";
-  write(t / ".kretro-wine-version", "wine-11.18 (Staging)\n");
-  write(t / "system.reg", "WINE REGISTRY Version 2\n[Software] 1\n");
-  write(t / "user.reg", "WINE REGISTRY Version 2\n");
-  write(t / "drive_c" / "windows" / "system32" / "kernel32.dll", std::string(5000, 'k'));
+  write_file(t / ".kretro-wine-version", "wine-11.18 (Staging)\n");
+  write_file(t / "system.reg", "WINE REGISTRY Version 2\n[Software] 1\n");
+  write_file(t / "user.reg", "WINE REGISTRY Version 2\n");
+  write_file(t / "drive_c" / "windows" / "system32" / "kernel32.dll", std::string(5000, 'k'));
   fs::create_directories(t / "dosdevices");
   fs::create_directory_symlink("../drive_c", t / "dosdevices" / "c:");
   fs::create_directory_symlink("/", t / "dosdevices" / "z:");
@@ -398,8 +410,8 @@ static void test_prefix_seed(const fs::path& tmp) {
   fs::permissions(t / "drive_c" / "windows" / "system32", fs::perms::owner_all, fs::perm_options::replace);
 
   // What the game made there, then an upgrade's snapshot of it.
-  write(p / "drive_c" / "users" / "player" / "Documents" / "save1.dat", "level 7");
-  write(p / "user.reg", "WINE REGISTRY Version 2\n[Software\\\\Example Publisher] 2\n\"Volume\"=\"9\"\n");
+  write_file(p / "drive_c" / "users" / "player" / "Documents" / "save1.dat", "level 7");
+  write_file(p / "user.reg", "WINE REGISTRY Version 2\n[Software\\\\Example Publisher] 2\n\"Volume\"=\"9\"\n");
   fs::path snap = player::snapshot_prefix(p, tmp / "state" / "example" / "prefix-before");
   CHECK(contains(snap.filename().string(), "wine-11.18"));
   CHECK_EQ(slurp(snap / "drive_c" / "users" / "player" / "Documents" / "save1.dat"), std::string("level 7"));
@@ -408,7 +420,7 @@ static void test_prefix_seed(const fs::path& tmp) {
   // The whole of drive_c/windows is Wine's to rewrite and is not copied.
   CHECK(!fs::exists(snap / "drive_c" / "windows"));
   // A copy, not a link: an upgrade rewriting the prefix leaves it as it was.
-  write(p / "user.reg", "rewritten");
+  write_file(p / "user.reg", "rewritten");
   CHECK(contains(slurp(snap / "user.reg"), "Volume"));
 }
 
@@ -468,6 +480,54 @@ static void test_key_registry() {
   CHECK_THROWS(player::key_registry(bad));
 }
 
+static void test_host_device_links(const fs::path& tmp) {
+  section("prefix: host device links go, drive links stay");
+  fs::path p = tmp / "devlinks" / "prefix";
+  fs::path dd = p / "dosdevices";
+  fs::create_directories(p / "drive_c");
+  fs::create_directories(dd);
+  fs::create_directory_symlink("../drive_c", dd / "c:");
+  fs::create_directory_symlink("../drive_c", dd / "d:");
+  // What a mount manager makes for a drive of the machine's own: dangling
+  // here, as it is on a machine without that device.
+  fs::create_symlink("/nonexistent/kretro-test-sr0", dd / "d::");
+  fs::create_symlink("/nonexistent/kretro-test-sr1", dd / "e::");
+  // Not a letter and two colons: left alone.
+  fs::create_symlink("/nonexistent/kretro-test-com1", dd / "com1");
+  fs::create_symlink("/nonexistent/kretro-test-ab", dd / "ab::");
+  player::drop_host_device_links(p);
+  CHECK(!fs::exists(fs::symlink_status(dd / "d::")));
+  CHECK(!fs::exists(fs::symlink_status(dd / "e::")));
+  CHECK(fs::is_symlink(dd / "c:"));
+  CHECK(fs::is_symlink(dd / "d:"));
+  CHECK(fs::is_symlink(dd / "com1"));
+  CHECK(fs::is_symlink(dd / "ab::"));
+  CHECK(fs::is_directory(p / "drive_c"));
+  // A prefix with no dosdevices yet is not an error.
+  player::drop_host_device_links(tmp / "devlinks" / "no-prefix");
+  CHECK(!fs::exists(tmp / "devlinks" / "no-prefix"));
+}
+
+static void test_embedded_key_once(const fs::path& tmp) {
+  section("key: a prefix that already has the key is not given it again");
+  // Only the path that needs no Wine: the marker already holds the hash of
+  // this key's text, so regedit is never run. Putting the key in is covered
+  // by the bundle integration test's dry run.
+  bundle::GameMeta::Key k;
+  k.value = "1234-5678-9ABC";
+  k.registry_path = "Software\\Example Publisher\\EXAMPLE";
+  k.registry_value = "CDKey";
+  fs::path p = tmp / "keyed" / "prefix";
+  fs::create_directories(p / "drive_c");
+  const std::string want = kg::to_hex(hash_string(player::key_registry(k)));
+  write_file(p / ".kretro-key", want + "\n");
+  std::vector<std::string> said;
+  player::apply_embedded_key(rt::Env{}, p, k, [&](const std::string& l) { said.push_back(l); });
+  CHECK(said.empty());
+  CHECK(!fs::exists(p / "drive_c" / ".kretro-key.reg"));
+  CHECK_EQ(slurp(p / ".kretro-key"), want + "\n");
+}
+
 static void test_extra_files(const fs::path& tmp) {
   section("extra files: beside the game, once, with overrides for the DLLs");
   fs::path game = tmp / "game-dir";
@@ -495,8 +555,8 @@ static void test_extra_files(const fs::path& tmp) {
   Meta m;
   m.run.exe = "bin\\game.exe";
   fs::path tree = tmp / "exe-tree";
-  write(tree / "Bin" / "GAME.EXE", "MZ");
-  write(tree / "readme.txt", "x");
+  write_file(tree / "Bin" / "GAME.EXE", "MZ");
+  write_file(tree / "readme.txt", "x");
   m.tree = Tree::from_directory(tree);
   CHECK_EQ(player::exe_dir_in_tree(m), std::string("Bin"));
   m.run.exe = "readme.txt";
@@ -505,9 +565,9 @@ static void test_extra_files(const fs::path& tmp) {
   CHECK_EQ(player::exe_dir_in_tree(m), std::string());
 
   // The layer: beside the executable, and exactly the bundle's files - what a
-  // newer build dropped goes, and so does a copy where the exe used to be.
+  // newer build dropped goes, and so does a copy where the exe was before.
   fs::path layer = tmp / "extra-layer";
-  write(layer / "old.dll", "gone");
+  write_file(layer / "old.dll", "gone");
   CHECK_EQ(player::stage_extra_layer(files, "Bin", layer), std::string("ddraw=n,b;d3d8=n,b"));
   CHECK_EQ(slurp(layer / "Bin" / "DDraw.dll"), std::string("MZ ddraw v2"));
   CHECK(!fs::exists(layer / "old.dll"));
@@ -540,7 +600,7 @@ static void test_gamepad_bindings() {
 static void test_profile_adoption(const fs::path& tmp) {
   section("profile: an old kretro prefix's C:\\users\\<login> becomes C:\\users\\player");
   fs::path p = tmp / "old-prefix";
-  write(p / "drive_c" / "users" / "kim" / "Documents" / "save.dat", "level 7");
+  write_file(p / "drive_c" / "users" / "kim" / "Documents" / "save.dat", "level 7");
   fs::create_directories(p / "drive_c" / "users" / "Public");
   std::string said = session::adopt_player_profile(p);
   CHECK(contains(said, "C:\\users\\kim"));
@@ -554,15 +614,15 @@ static void test_profile_adoption(const fs::path& tmp) {
 
   // Two old profiles: which holds the saves is not a guess to make.
   fs::path two = tmp / "two-profiles";
-  write(two / "drive_c" / "users" / "kim" / "a", "1");
-  write(two / "drive_c" / "users" / "root" / "b", "2");
+  write_file(two / "drive_c" / "users" / "kim" / "a", "1");
+  write_file(two / "drive_c" / "users" / "root" / "b", "2");
   CHECK_EQ(session::adopt_player_profile(two), std::string());
   CHECK(!fs::exists(two / "drive_c" / "users" / "player"));
 
   // A player's own prefix, and one that already has both: left alone.
   fs::path both = tmp / "both-profiles";
-  write(both / "drive_c" / "users" / "kim" / "a", "1");
-  write(both / "drive_c" / "users" / "player" / "b", "2");
+  write_file(both / "drive_c" / "users" / "kim" / "a", "1");
+  write_file(both / "drive_c" / "users" / "player" / "b", "2");
   CHECK_EQ(session::adopt_player_profile(both), std::string());
   CHECK(fs::is_directory(both / "drive_c" / "users" / "kim"));
   CHECK(!fs::is_symlink(both / "drive_c" / "users" / "kim"));
@@ -617,6 +677,64 @@ static void test_desktop(const fs::path& tmp) {
 }
 
 // ---- the command line -------------------------------------------------------------
+
+// The line a session starts the gamepad helper with, and the helper's reading
+// of it: kretro and the player both read what the session wrote, so the two
+// halves have to agree word for word.
+static void test_input_helper_args() {
+  section("input helper: the session's argv reads back as it was written");
+  session::InputHelperArgs in;
+  in.display = ":7";
+  in.pid = 4242;
+  in.game = "example-game";
+  in.pause = false;
+  const std::vector<std::string> argv = session::input_helper_argv(in);
+  CHECK((argv == std::vector<std::string>{"input", "--display", ":7", "--pid", "4242", "--game", "example-game",
+                                          "--no-pause"}));
+  // parse_input_helper takes the words after "input".
+  session::InputHelperArgs out = session::parse_input_helper({argv.begin() + 1, argv.end()});
+  CHECK_EQ(out.display, in.display);
+  CHECK_EQ(out.pid, in.pid);
+  CHECK_EQ(out.game, in.game);
+  CHECK_EQ(out.pause, in.pause);
+  CHECK(out.valid());
+
+  // No game and pausing: neither --game nor --no-pause is written.
+  session::InputHelperArgs bare;
+  bare.display = ":1";
+  bare.pid = 9;
+  const std::vector<std::string> bare_argv = session::input_helper_argv(bare);
+  CHECK((bare_argv == std::vector<std::string>{"input", "--display", ":1", "--pid", "9"}));
+  out = session::parse_input_helper({bare_argv.begin() + 1, bare_argv.end()});
+  CHECK_EQ(out.display, std::string(":1"));
+  CHECK_EQ(out.pid, 9);
+  CHECK(out.game.empty());
+  CHECK(out.pause);
+
+  // A word it does not know is passed over, and a --pid with nothing after it
+  // is ignored, which leaves the arguments not valid.
+  out = session::parse_input_helper({"--display", ":3", "--bogus", "--pid"});
+  CHECK_EQ(out.display, std::string(":3"));
+  CHECK_EQ(out.pid, 0);
+  CHECK(out.pause);
+  CHECK(!out.valid());
+}
+
+// The newest of the logs a doctor report ends with: the most recently written
+// file that exists, whichever the candidates are.
+static void test_newest_file(const fs::path& tmp) {
+  section("doctor: the newest log of those that exist");
+  const fs::path older = tmp / "logs" / "older.log";
+  const fs::path newer = tmp / "logs" / "newer.log";
+  const fs::path missing = tmp / "logs" / "missing.log";
+  write_file(older, "old\n");
+  write_file(newer, "new\n");
+  const auto now = fs::last_write_time(newer);
+  fs::last_write_time(older, now - std::chrono::hours(1));
+  CHECK_EQ(player::doctor::newest_file({older, missing, newer}), newer);
+  CHECK_EQ(player::doctor::newest_file({newer, older}), newer);
+  CHECK_EQ(player::doctor::newest_file({missing}), fs::path());
+}
 
 static void test_cli() {
   section("cli: every form the player takes, and what it refuses");
@@ -681,40 +799,8 @@ static void test_cli() {
 
 // ---- a real player file --------------------------------------------------------------
 
-static Meta pack_meta(const fs::path& tmp, const std::string& id) {
-  fs::path root = tmp / ("tree-" + id);
-  write(root / "GAME.EXE", "MZ this is " + id);
-  write(root / "data" / "level1.dat", std::string(3000, 'L') + id);
-  Meta m;
-  m.id = id;
-  m.name = "The game " + id;
-  m.year = 1999;
-  m.run.exe = "GAME.EXE";
-  m.tree = Tree::from_directory(root);
-  return m;
-}
-
-static fs::path make_pack(const fs::path& tmp, const std::string& id) {
-  fs::path body = tmp / (id + ".body");
-  std::string b;
-  for (size_t i = 0; i < 20000; ++i) b.push_back(static_cast<char>('a' + (i * 7 + id.size()) % 26));
-  write(body, b);
-  fs::path out = tmp / "shelf" / (id + ".kgpack");
-  fs::create_directories(out.parent_path());
-  write_pack(out, pack_meta(tmp, id), WriteOptions{kg::Kind::Game, body, false});
-  return out;
-}
-
 static fs::path make_player(const fs::path& tmp, const std::vector<std::string>& ids) {
-  write(tmp / "in" / "bootstrap", std::string("\x7f" "ELF") + std::string(2000, 'b'));
-  write(tmp / "in" / "tools", std::string(6000, 't'));
-  write(tmp / "in" / "runtime", std::string(9000, 'r'));
-  write(tmp / "in" / "app", std::string(3000, 'a'));
-  fs::path base = tmp / "player-base";
-  bundle::link_file(base, tmp / "in" / "bootstrap",
-                    {{bundle::Kind::Tools, tmp / "in" / "tools", ""},
-                     {bundle::Kind::Runtime, tmp / "in" / "runtime", ""},
-                     {bundle::Kind::App, tmp / "in" / "app", ""}});
+  fs::path base = make_base(tmp);
   bundle::BundleMeta m;
   m.id = "retro-shelf";
   m.title = "Retro Shelf Classics";
@@ -733,16 +819,6 @@ static fs::path make_player(const fs::path& tmp, const std::vector<std::string>&
   bundle::BaseSource bs;
   bs.path = base;
   return bundle::build_bundle(bs, m, packs, tmp / "classics.run").path;
-}
-
-static void flip(const fs::path& p, uint64_t off) {
-  std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-  f.seekg(static_cast<std::streamoff>(off));
-  char c = 0;
-  f.read(&c, 1);
-  c = static_cast<char>(c ^ 0x5a);
-  f.seekp(static_cast<std::streamoff>(off));
-  f.write(&c, 1);
 }
 
 static void test_player_file(const fs::path& tmp) {
@@ -789,7 +865,7 @@ static void test_player_file(const fs::path& tmp) {
   // it is not remembered as checked, and example - checked, and whole - still
   // plays.
   const bundle::Entry* e = b.pack("classic2");
-  flip(file, b.toc.at(*e) + e->len / 2);
+  flip_byte(file, b.toc.at(*e) + e->len / 2);
   bool damaged = false;
   try {
     p.verify("classic2");
@@ -815,7 +891,7 @@ static void test_player_file(const fs::path& tmp) {
   // to a directory that is not there any more.
   fs::path elsewhere = tmp / "big-disk" / "example";
   fs::create_directories(elsewhere);
-  write(state_dir() / "example" / "unpacked-at", elsewhere.string() + "\n");
+  write_file(state_dir() / "example" / "unpacked-at", elsewhere.string() + "\n");
   CHECK_EQ(p.unpack_plan("example").where, elsewhere);
   fs::remove_all(tmp / "big-disk");
   CHECK_EQ(p.unpack_plan("example").where, game_extract_dir("example"));
@@ -827,12 +903,12 @@ static void test_player_file(const fs::path& tmp) {
   // unpacks, is filled. The DwarFS tool is a stand-in that unpacks one file.
   {
     fs::path tool = tmp / "fake-dwarfs";
-    write(tool, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
-                "mkdir -p \"$out\" && echo unpacked > \"$out/GAME.EXE\"\n");
+    write_file(tool, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+               "mkdir -p \"$out\" && echo unpacked > \"$out/GAME.EXE\"\n");
     fs::permissions(tool, fs::perms::owner_all);
     setenv("KRETRO_DWARFS", tool.c_str(), 1);
     fs::path mine = tmp / "Games" / "example";
-    write(mine / "my-own-save.txt", "a year of play");
+    write_file(mine / "my-own-save.txt", "a year of play");
     bool refused = false;
     try {
       p.unpack("example", mine);
@@ -852,7 +928,7 @@ static void test_player_file(const fs::path& tmp) {
     const std::string stamp = session::extraction_stamp(pk.meta(), pk.header());
     CHECK(session::extraction_stamp_matches(session::extraction_stamp_file(empty), stamp));
     // Its own, again: replaced.
-    write(empty / "left-over", "x");
+    write_file(empty / "left-over", "x");
     p.unpack("example", empty);
     CHECK(!fs::exists(empty / "left-over"));
     CHECK(fs::exists(empty / "GAME.EXE"));
@@ -861,25 +937,25 @@ static void test_player_file(const fs::path& tmp) {
   }
 
   // A second start of a game while the first holds its lock - playing it, or
-  // still making its prefix - is told so before it touches the prefix. It
-  // used to seed first and ask after, so two starts in the first minute each
-  // removed the other's half-made copy.
+  // still making its prefix - is told so before it touches the prefix. Seeding
+  // first and asking after would let two starts in the first minute each
+  // remove the other's half-made copy.
   {
     // A runtime with a template in it, so there is a seed to be made.
     rt::Env fake;
     fake.root = tmp / "fake-runtime";
-    write(fake.root / "opt" / "kretro" / "prefix-template" / ".kretro-wine-version", "wine-11.18\n");
-    write(fake.root / "opt" / "kretro" / "prefix-template" / "system.reg", "WINE REGISTRY Version 2\n");
+    write_file(fake.root / "opt" / "kretro" / "prefix-template" / ".kretro-wine-version", "wine-11.18\n");
+    write_file(fake.root / "opt" / "kretro" / "prefix-template" / "system.reg", "WINE REGISTRY Version 2\n");
     player::Player pt(b, fake, st, gpu::Report{});
     session::GameLock held = session::lock_game("example");
     CHECK(!held.busy());
     // The author's files are the lowest layer the running game's overlay
     // has, and another build of the bundle - this one carries none - must
     // not restage them, or remove them, from under it.
-    write(state_dir() / "example" / "extra" / "dgVoodoo.conf", "the running build's");
+    write_file(state_dir() / "example" / "extra" / "dgVoodoo.conf", "the running build's");
     bool refused = false;
     try {
-      pt.play("example", player::PlayRequest{});
+      pt.play("example", player::PlayOverrides{});
     } catch (const std::exception& ex) {
       refused = contains(ex.what(), "made ready to play");
     }
@@ -891,7 +967,7 @@ static void test_player_file(const fs::path& tmp) {
     // plays from, and writes into, the very tree an unpack removes first.
     setenv("KRETRO_DWARFS", (tmp / "fake-dwarfs").c_str(), 1);
     fs::path played = tmp / "Games" / "empty" / "example";  // unpacked above, stamped
-    write(played / "SAVE.DAT", "being written");
+    write_file(played / "SAVE.DAT", "being written");
     bool busy = false;
     try {
       pt.unpack("example", played);
@@ -948,8 +1024,8 @@ static void test_signal_while_mounting(const fs::path& tmp) {
   const bundle::Entry* e = b.pack("example");
   fs::path bin = tmp / "signal-bin";
   fs::path log = tmp / "unmounted.log";
-  write(bin / "fusermount3", "#!/bin/sh\necho \"$@\" >> '" + log.string() + "'\n");
-  write(bin / "dwarfs", "#!/bin/sh\nkill -TERM $PPID\nsleep 2\nexit 1\n");
+  write_file(bin / "fusermount3", "#!/bin/sh\necho \"$@\" >> '" + log.string() + "'\n");
+  write_file(bin / "dwarfs", "#!/bin/sh\nkill -TERM $PPID\nsleep 2\nexit 1\n");
   fs::permissions(bin / "fusermount3", fs::perms::owner_all);
   fs::permissions(bin / "dwarfs", fs::perms::owner_all);
   pid_t pid = fork();
@@ -957,15 +1033,16 @@ static void test_signal_while_mounting(const fs::path& tmp) {
     const char* path = std::getenv("PATH");
     setenv("PATH", (bin.string() + ":" + (path ? path : "/usr/bin:/bin")).c_str(), 1);
     setenv("KRETRO_DWARFS", (bin / "dwarfs").c_str(), 1);
-    session::Options o;
+    session::PlayRequest req;
+    req.id = "example";
     session::Source s;
     s.file = file;
     s.off = b.toc.at(*e);
     s.len = e->len;
-    o.source = s;
-    o.dry_run = true;
+    req.source = s;
+    req.dry_run = true;
     try {
-      session::play(rt::Env{}, "example", o);
+      session::play(rt::Env{}, req);
     } catch (const std::exception&) {
       _exit(3);
     }
@@ -1062,27 +1139,30 @@ int main() {
     test_state_choice(tmp);
     test_bundle_layout();
     test_launcher_and_settings(tmp);
+    test_golden_state_files(tmp);
     test_warnings_once(tmp);
     test_memo(tmp);
     test_prefix_decision();
     test_prefix_seed(tmp);
     test_key_registry();
+    test_embedded_key_once(tmp);
+    test_host_device_links(tmp);
     test_extra_files(tmp);
     test_gamepad_bindings();
     test_profile_adoption(tmp);
     test_desktop(tmp);
     test_cli();
+    test_input_helper_args();
+    test_newest_file(tmp);
     test_player_file(tmp);
     test_helper_state(tmp);
     test_signal_while_mounting(tmp);
     test_tied_children();
     test_wine_home_is_confined();
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

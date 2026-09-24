@@ -13,6 +13,7 @@
 // author opted in to embedding one.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -23,6 +24,11 @@
 namespace kg::bundle {
 
 inline constexpr uint64_t kMetaFormat = 1;
+
+// The graphics backends and display modes a game may ask for, in the order the
+// Bundles page offers them. validate() refuses anything else.
+inline constexpr std::array<std::string_view, 5> kBackendNames = {"auto", "dxvk", "wined3d-vk", "wined3d-gl", "cnc-ddraw"};
+inline constexpr std::array<std::string_view, 3> kDisplayModes = {"integer", "fit", "native"};
 
 struct GameMeta {
   std::string id;
@@ -90,19 +96,5 @@ struct BundleMeta {
 
   bool operator==(const BundleMeta&) const = default;
 };
-
-// The gamepad map's one written form: "button=keysym", one a line, in button
-// order. It is what the Bundles page shows and edits, what the builder makes
-// from a pack's own [input], and what the player's helper reads back, so the
-// three cannot drift apart. The button names are the helper's own (a, b, x,
-// y, up, down, left, right, start, back, l, r) and the keys are X keysym
-// names, as a manifest writes them.
-std::string format_gamepad(const std::map<std::string, std::string>& binds);
-
-// Reads that form back. Lenient about what a person typed on the page: a ','
-// or ';' also ends an entry, blanks around either side go, and anything that
-// is not button=key is skipped - a wrong entry costs that one button, not the
-// gamepad. A button named twice keeps its last key.
-std::map<std::string, std::string> parse_gamepad(std::string_view text);
 
 }  // namespace kg::bundle

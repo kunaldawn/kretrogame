@@ -57,6 +57,7 @@ ProcResult run(const std::vector<std::string>& argv, const ProcOptions& opt) {
 
     std::vector<char*> a;
     std::vector<std::string> owned = argv;
+    a.reserve(owned.size() + 1);
     for (std::string& s : owned) a.push_back(s.data());
     a.push_back(nullptr);
     // A bare name is looked up on PATH; a path is used as given. execv alone

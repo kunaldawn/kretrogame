@@ -1,6 +1,6 @@
 // Tier 1 unit tests for the wizard's arithmetic: no display, no Wine, no disc.
 //
-// These live against src/install/build.cpp rather than src/gui/wizard.cpp for
+// These live against src/install/ rather than src/gui/wizard/ for
 // one reason: a test binary links LIB_OBJ + B3_OBJ and cannot see a
 // translation unit that includes SDL. Anything the wizard decides which could
 // be quietly wrong belongs on this side of that line.
@@ -10,55 +10,28 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "install/build.h"
+#include "install/draft.h"
+#include "install/game_id.h"
 #include "install/keys.h"
+#include "install/manifest.h"
+#include "install/preset.h"
+#include "install/setup_ref.h"
+#include "install/source.h"
+#include "install/staging.h"
+#include "install/survey.h"
 #include "util/hash.h"
 #include "util/paths.h"   // cache_dir(), games_dir(): where a test looks
+#include "support/check.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
-
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-#define CHECK_THROWS(expr)                                                \
-  do {                                                                    \
-    ++checks;                                                             \
-    bool threw = false;                                                   \
-    try { expr; } catch (const std::exception&) { threw = true; }         \
-    if (!threw) {                                                         \
-      ++failures;                                                         \
-      std::fprintf(stderr, "  FAIL %s:%d  expected a throw from %s\n",    \
-                   __FILE__, __LINE__, #expr);                            \
-    }                                                                     \
-  } while (0)
 
 static void write_file(const fs::path& p, size_t bytes) {
   std::error_code ec;
@@ -76,16 +49,16 @@ static void test_classify(const fs::path& tmp) {
   write_file(d / "setup.exe", 3);
   write_file(d / "readme.txt", 3);
 
-  using K = install::Build::Source::Kind;
-  CHECK(install::Build::classify(d / "Disc 1").kind == K::Directory);
-  CHECK(install::Build::classify(d / "game.iso").kind == K::DiscImage);
-  CHECK(install::Build::classify(d / "game.zip").kind == K::Archive);
-  CHECK(install::Build::classify(d / "setup.exe").kind == K::BareExe);
+  using K = install::Source::Kind;
+  CHECK(install::classify_source(d / "Disc 1").kind == K::Directory);
+  CHECK(install::classify_source(d / "game.iso").kind == K::DiscImage);
+  CHECK(install::classify_source(d / "game.zip").kind == K::Archive);
+  CHECK(install::classify_source(d / "setup.exe").kind == K::BareExe);
 
-  install::Build::Source bad = install::Build::classify(d / "readme.txt");
+  install::Source bad = install::classify_source(d / "readme.txt");
   CHECK(bad.kind == K::Unreadable);
   CHECK(!bad.trouble.empty());
-  CHECK(install::Build::classify(d / "nothing-here.iso").kind == K::Unreadable);
+  CHECK(install::classify_source(d / "nothing-here.iso").kind == K::Unreadable);
 
   // Nothing was opened: three bytes is not an ISO 9660 volume descriptor, and
   // classify still answered DiscImage for it.
@@ -98,14 +71,14 @@ static void test_slug() {
   CHECK_EQ(install::slug("Example G.A.M.E."), std::string("example-g-a-m-e"));
   CHECK_EQ(install::slug(""), std::string(""));
 
-  // The staging directory the CLI hardcodes. main_kretro.cpp:654 builds this
-  // same path by hand to find a running install, so it is a contract.
+  // The staging directory `kretro swap <id> <n>` asks install::staging_dir
+  // for to find a running install it did not start, so it is a contract.
   CHECK_EQ(install::staging_dir("adventure-ii"), cache_dir() / "install-adventure-ii");
 }
 
 static void test_candidate_ranking() {
-  // What install.cpp used to hand to detect_install_dir: the diff of drive_c
-  // across the installer run. Three directories come out of these four files.
+  // What detect_install_dir is handed: the diff of drive_c across the
+  // installer run. Three directories come out of these four files.
   auto added = [](const char* p, uint64_t size) {
     TreeEntry te;
     te.path = p;
@@ -119,7 +92,7 @@ static void test_candidate_ranking() {
   d.added.push_back(added("Program Files/Adventure II/Music.pak", 330000000));
   d.added.push_back(added("Temp/setup.log", 4096));
 
-  std::vector<install::Build::Candidate> c =
+  std::vector<install::Candidate> c =
       install::rank_candidates("/nonexistent-drive-c", d);
   CHECK_EQ(c.size(), 3u);
 
@@ -304,8 +277,8 @@ static void test_draft_to_meta() {
   // downloaded - records none, and export_recipe is right to refuse that one.
   CHECK_EQ(install::draft_to_meta(d, {}).recipe.fingerprints.size(), 0u);
 
-  // The serial stays on this machine. keys.h:1-7 is the policy; this is it
-  // being kept.
+  // The serial stays on this machine. The comment at the top of keys.h is the
+  // policy; this is it being kept.
   CHECK(m.encode().find("ABCD-1234-EFGH-5678") == std::string::npos);
 
   // Unchecking the discs marks them, so play can say "needs the original disc"
@@ -355,8 +328,8 @@ static void test_staging_lifetime(const fs::path& tmp) {
     install::Build b(e, work, quiet);
     CHECK(fs::exists(work));
     CHECK(!fs::exists(work / "stale"));
-    // The layout `kretro swap <id> <n>` walks: main_kretro.cpp:656 expects
-    // work/prefix and :662 expects work/drive-<letter>.
+    // The layout `kretro swap <id> <n>` walks: install::staging_prefix is
+    // work/prefix and install::staging_drive is work/drive-<letter>.
     CHECK(fs::exists(work / "prefix"));
     CHECK(fs::exists(work / "home"));
 
@@ -378,7 +351,7 @@ static void test_staging_lifetime(const fs::path& tmp) {
     CHECK_EQ(b.discs().size(), 2u);
     CHECK_EQ(b.discs()[1].label, std::string("TWO"));
   }
-  // Gigabytes under cache_dir() used to survive a cancelled or crashed
+  // Gigabytes under cache_dir() must not survive a cancelled or crashed
   // install. Nothing else deletes this.
   CHECK(!fs::exists(work));
 
@@ -495,7 +468,7 @@ static void test_open_sources(const fs::path& tmp) {
     // A source that could not be read is listed with a reason and does not
     // stop the others.
     CHECK_EQ(b.sources().size(), 3u);
-    CHECK(b.sources()[2].kind == install::Build::Source::Kind::Unreadable);
+    CHECK(b.sources()[2].kind == install::Source::Kind::Unreadable);
     CHECK(!b.sources()[2].trouble.empty());
 
     // One Source per file handed over, in the order they were handed over.
@@ -509,9 +482,9 @@ static void test_open_sources(const fs::path& tmp) {
     }
     // And what opened cleanly keeps the kind it was classified as, so adopting
     // the list wholesale cannot demote a good source.
-    CHECK(b.sources()[0].kind == install::Build::Source::Kind::Directory);
+    CHECK(b.sources()[0].kind == install::Source::Kind::Directory);
     CHECK(b.sources()[0].trouble.empty());
-    CHECK(b.sources()[1].kind == install::Build::Source::Kind::Directory);
+    CHECK(b.sources()[1].kind == install::Source::Kind::Directory);
   }
 
   // Two dumps of one disc are one disc and one alternate, and it takes the
@@ -632,7 +605,7 @@ static void test_file_counter(const fs::path& tmp) {
   CHECK_EQ(install::count_entries(work / "no-such-drive"), 0u);
 
   // Nothing has counted yet. The page reads a published number and never walks
-  // anything itself - that walk used to happen on the UI thread, in the middle
+  // anything itself - on the UI thread that walk would happen in the middle
   // of a frame, once a second for the length of the install.
   CHECK_EQ(b.files_written_so_far(), 0u);
 
@@ -719,7 +692,7 @@ static void test_write_draft_verify(const fs::path& tmp) {
   CHECK_THROWS(b.write(d));
 
   // The body was laid out before the packing that failed, and it is rooted:
-  // the game is at body/game, which is where Milestone 2's open_layers looks
+  // the game is at body/game, which is where session::open_layers looks
   // for it and what the Merkle root is taken over. It is the confirmed
   // directory that travelled, not drive_c.
   CHECK(fs::exists(work / "body" / "game" / "Adventure II.exe"));
@@ -770,8 +743,8 @@ static void test_root_advisory(const fs::path& tmp) {
   // The comparison install::run makes, both ways round. A mismatch is a fact
   // reported and not a refusal - two people clicking through InstallShield
   // need not produce the same bytes - so what has to hold is only that the
-  // answer is false when the roots differ, where it used to be
-  // opt.expect_root_set and therefore always true.
+  // answer is false when the roots differ, rather than opt.expect_root_set
+  // and therefore always true.
   Hash other = res.root;
   other[0] = static_cast<uint8_t>(other[0] ^ 0xff);
   CHECK(!(res.root == other));
@@ -821,7 +794,6 @@ static void test_id_clash(const fs::path& tmp) {
 // but the collection does not hold is reported by name rather than resolving
 // to an empty path that fails four steps later.
 static void test_draft_from_meta(const fs::path& tmp) {
-  rt::Env e;
   fs::path iso = tmp / "iso";
   fs::create_directories(iso);
   std::ofstream(iso / "SideStory.zip") << "not really a zip";
@@ -841,7 +813,7 @@ static void test_draft_from_meta(const fs::path& tmp) {
   m.run.windows_version = "win98";
   m.runtime.dgvoodoo = true;
 
-  install::Prefill p = install::draft_from_meta(e, m);
+  install::Prefill p = install::draft_from_meta(m);
   CHECK_EQ(p.draft.id, std::string("demo-game-side-story"));
   CHECK_EQ(p.draft.name, std::string("Demo-Game: Side Story"));
   CHECK_EQ(p.draft.year, 2001u);
@@ -937,12 +909,16 @@ static void test_setup_ref_round_trip() {
   CHECK_EQ(taken.setup.generic_string(), std::string("2/Setup/Setup.exe"));
 }
 
-// The staging layout is shared with `kretro swap <id> <n>`, which hardcodes it
-// at main_kretro.cpp:654,662; if these two ever disagree the command addresses
-// nothing and says nothing.
+// The staging layout is shared with `kretro swap <id> <n>`, which finds it
+// through install::staging_dir and install::staging_drive; if the command and
+// the install ever disagree the command addresses nothing and says nothing.
 static void test_staging_layout() {
   CHECK_EQ(install::staging_drive_c("/tmp/install-adventure2").string(),
            std::string("/tmp/install-adventure2/prefix/drive_c"));
+  const fs::path w = "/tmp/install-adventure2";
+  CHECK_EQ(install::staging_drive(w, 0), w / "drive-d");
+  CHECK_EQ(install::staging_drive(w, 2), w / "drive-f");
+  CHECK_EQ(install::staging_prefix(w), w / "prefix");
 }
 
 // draft_to_meta must carry the list into the pack, or the wizard computes it
@@ -964,10 +940,9 @@ static void test_draft_verify(const fs::path& tmp) {
   CHECK_EQ(m.recipe.verify[0], std::string("dg.exe"));
 
   // And Build::write keeps what it was handed rather than working the same
-  // question out again. It used to recompute unconditionally, which made the
-  // field something the wizard filled, carried across four steps and had
-  // discarded on arrival - with a comment beside the line saying the field did
-  // not exist.
+  // question out again. Recomputing unconditionally would make the field
+  // something the wizard fills, carries across four steps and has discarded
+  // on arrival.
   fs::path root = tmp / "carried-root";
   write_file(root / "Program Files" / "Publisher" / "Demo-Game" / "dg.exe", 2);
   write_file(root / "Program Files" / "Publisher" / "Demo-Game" / "assets.pak", 90000);
@@ -1106,7 +1081,7 @@ static void test_preset_match(const fs::path& tmp) {
   unsetenv("KRETRO_MANIFESTS");
 }
 
-// The fourth method was unreachable from the wizard: classify() calls any .exe
+// The fourth method was unreachable from the wizard: classify_source() calls any .exe
 // a BareExe, open_sources deliberately opens no disc for one, and step 1 then
 // refused to continue without a disc set. So "run the installer you dropped"
 // was offered on step 3 and selectable from nowhere.
@@ -1115,9 +1090,9 @@ static void test_bare_exe_sources(const fs::path& tmp) {
   write_file(d / "game.iso", 3);
   write_file(d / "Setup Classic.exe", 3);
 
-  std::vector<install::Build::Source> disc = {install::Build::classify(d / "game.iso")};
-  std::vector<install::Build::Source> exe = {install::Build::classify(d / "Setup Classic.exe")};
-  std::vector<install::Build::Source> both = {disc[0], exe[0]};
+  std::vector<install::Source> disc = {install::classify_source(d / "game.iso")};
+  std::vector<install::Source> exe = {install::classify_source(d / "Setup Classic.exe")};
+  std::vector<install::Source> both = {disc[0], exe[0]};
 
   CHECK(install::bare_exe(disc).empty());
   CHECK_EQ(install::bare_exe(exe).filename().string(), std::string("Setup Classic.exe"));
@@ -1196,8 +1171,8 @@ static void test_a_recipe_does_not_pick_your_files() {
   CHECK(!install::setup_path_is_safe("Arena3/../../../etc/passwd"));
   CHECK(!install::setup_path_is_safe(""));
 
-  // staged_setup is the one road both callers take, so the refusal is there
-  // and not in either of them.
+  // staged_setup is the wizard's road to a setup, which the GUI's rebuild
+  // button also takes, so the refusal is there and not in either caller.
   install::Draft d;
   d.method = install::Draft::Method::Installer;
   d.setup = "/usr/bin/xterm";
@@ -1213,7 +1188,7 @@ static void test_a_recipe_does_not_pick_your_files() {
   m.name = "Hostile";
   m.recipe.method = "installer_exe";
   m.recipe.setup = "/usr/bin/xterm";
-  install::Prefill p = install::draft_from_meta({}, m);
+  install::Prefill p = install::draft_from_meta(m);
   CHECK_EQ(p.draft.setup.string(), std::string(""));
   CHECK_EQ(p.unsafe_setup, std::string("/usr/bin/xterm"));
   CHECK_EQ(p.draft.name, std::string("Hostile"));
@@ -1223,7 +1198,7 @@ static void test_a_recipe_does_not_pick_your_files() {
   ok.id = "fine";
   ok.recipe.method = "wine_setup";
   ok.recipe.setup = "Arena3/Setup.exe";
-  install::Prefill q = install::draft_from_meta({}, ok);
+  install::Prefill q = install::draft_from_meta(ok);
   CHECK_EQ(q.draft.setup.string(), std::string("Arena3/Setup.exe"));
   CHECK_EQ(q.unsafe_setup, std::string(""));
 }
@@ -1357,12 +1332,57 @@ static void test_method_clamp() {
   // What the page actually does, end to end: the sources are a disc set, the
   // draft came in naming the fourth method, and the entry the combo lands on
   // is the method that runs.
-  std::vector<install::Build::Source> disc(1);
-  disc[0].kind = install::Build::Source::Kind::DiscImage;
+  std::vector<install::Source> disc(1);
+  disc[0].kind = install::Source::Kind::DiscImage;
   disc[0].path = "arena3.iso";
   const std::vector<M> ways = install::methods_for(disc, 1);
   const M chosen = install::clamp_method(ways, M::InstallerExe);
   CHECK(std::find(ways.begin(), ways.end(), chosen) != ways.end());
+}
+
+// recipe.method is written into every pack, so its four strings are an on-disk
+// format: pinned here, and each read back as the method it was written from.
+// An empty method names nothing, and a string this build does not know is an
+// installer disc, which is what draft_from_meta and apply_preset have always
+// made of it.
+static void test_method_strings() {
+  using M = install::Draft::Method;
+  CHECK_EQ(std::string(install::recipe_method(M::Installer)), std::string("wine_setup"));
+  CHECK_EQ(std::string(install::recipe_method(M::InstallerExe)), std::string("installer_exe"));
+  CHECK_EQ(std::string(install::recipe_method(M::Copy)), std::string("copy"));
+  CHECK_EQ(std::string(install::recipe_method(M::Unzip)), std::string("unzip"));
+
+  for (M m : {M::Installer, M::InstallerExe, M::Copy, M::Unzip}) {
+    std::optional<M> back = install::method_from_recipe(install::recipe_method(m));
+    CHECK(back.has_value() && *back == m);
+  }
+
+  CHECK(!install::method_from_recipe("").has_value());
+  std::optional<M> bogus = install::method_from_recipe("bogus");
+  CHECK(bogus.has_value() && *bogus == M::Installer);
+}
+
+// install::run's rule for where a recipe's game landed: the first candidate,
+// in ranked order, holding every verify entry at once, found in any case.
+static void test_find_install_dir(const fs::path& tmp) {
+  fs::path c = tmp / "find-install-dir" / "drive_c";
+  write_file(c / "Games" / "Arena3" / "Data" / "saves.dat", 3);
+  write_file(c / "Games" / "Arena3" / "ARENA3.EXE", 3);
+  write_file(c / "Games" / "Arena3" / "maps.pak", 3);
+
+  std::vector<install::Candidate> cands(3);
+  cands[0].dir = "Games/Arena3/Data";
+  cands[1].dir = "Games/Arena3";
+  cands[2].dir = "Games";
+
+  // The deeper directory holds one entry and not the other, so it is passed
+  // over for the one that holds both.
+  CHECK_EQ(install::find_install_dir(cands, c, {"arena3.exe", "maps.pak"}).generic_string(),
+           std::string("Games/Arena3"));
+  // Nothing holds a file that is not there.
+  CHECK(install::find_install_dir(cands, c, {"arena3.exe", "missing.dat"}).empty());
+  // And with no list there is nothing to hold, so no answer.
+  CHECK(install::find_install_dir(cands, c, {}).empty());
 }
 
 // A copy or an unzip runs no installer, writes nothing to C: and leaves no
@@ -1543,11 +1563,11 @@ int main() {
   fs::remove_all(tmp);
   fs::create_directories(tmp);
 
-  // state_dir() caches its answer in a function-local static (paths.cpp:19),
+  // state_dir() caches its answer in a function-local static (util/paths.cpp),
   // so this has to happen before anything at all asks where state lives.
   ::setenv("KRETRO_STATE", (tmp / "state").c_str(), 1);
   // Build::write puts the finished pack in games_dir(), and nothing below it
-  // creates that directory: in the app it is library.cpp:53 that does, and on
+  // creates that directory: in the app it is gui::scan that does, and on
   // the CLI it is install::run. A test binary is neither, so it does it here.
   ensure_state_dirs();
 
@@ -1580,15 +1600,15 @@ int main() {
     test_setup_preselection();
     test_setup_ref_split();
     test_method_clamp();
+    test_method_strings();
+    test_find_install_dir(tmp);
     test_survey_extracted(tmp);
     test_copy_install(tmp);
     test_prefill_serial(tmp);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

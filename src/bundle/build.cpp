@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../pack/kgpack.h"
+#include "../util/file_io.h"
 
 namespace kg::bundle {
 namespace fs = std::filesystem;
@@ -30,28 +31,6 @@ constexpr uint64_t kMaxMetaBytes = 64ull << 20;
 std::string sys(const std::string& what, const fs::path& p) {
   return what + " " + p.string() + ": " + std::strerror(errno);
 }
-
-class Fd {
- public:
-  Fd(const fs::path& p, int flags, mode_t mode = 0) : fd_(::open(p.c_str(), flags | O_CLOEXEC, mode)) {
-    if (fd_ < 0) fail(sys("cannot open", p));
-  }
-  ~Fd() { close(); }
-  Fd(const Fd&) = delete;
-  Fd& operator=(const Fd&) = delete;
-  int get() const { return fd_; }
-  // Returns whether the close itself failed, which on some filesystems is where
-  // a full disk is first admitted.
-  bool close() {
-    if (fd_ < 0) return true;
-    int r = ::close(fd_);
-    fd_ = -1;
-    return r == 0;
-  }
-
- private:
-  int fd_;
-};
 
 // Counts bytes against a total, reports them, and is where a cancel is heard.
 struct Meter {
@@ -162,6 +141,13 @@ uint64_t size_of(const fs::path& p) {
   return n;
 }
 
+// The bytes a base spans: `len`, or the rest of the file from `off`. The file's
+// size is asked for either way, so a base that is not there says so here.
+uint64_t base_length(const BaseSource& b) {
+  uint64_t whole = size_of(b.path);
+  return b.len ? *b.len : whole - std::min(b.off, whole);
+}
+
 // A player base is a v4 file carrying tools, runtime and app, once each, and
 // nothing else: no meta, because it is not yet a player, and no games.
 void check_base(const Toc& t, const std::string& what) {
@@ -262,6 +248,10 @@ uint64_t payload_bytes(const Toc& t) {
 
 }  // namespace
 
+BaseSource BaseSource::whole_file(const fs::path& p) { return BaseSource{p, 0, std::nullopt, std::nullopt}; }
+
+Toc read_base_toc(const BaseSource& b) { return read_toc(b.path, b.off, base_length(b)); }
+
 Hash hash_range(const fs::path& p, uint64_t off, uint64_t len, const Callbacks& cb) {
   Meter m{cb, "hashing", 0, len};
   Hasher h;
@@ -290,15 +280,13 @@ Built build_bundle(const BaseSource& base, const BundleMeta& meta, const std::ve
                    const fs::path& out, const Callbacks& cb) {
   // Everything that can be refused without writing a byte is refused first.
   meta.validate();
-  uint64_t whole = size_of(base.path);
-  uint64_t base_len = base.len ? *base.len : whole - std::min(base.off, whole);
+  uint64_t base_len = base_length(base);
   Toc bt = read_toc(base.path, base.off, base_len);
   check_base(bt, "the player base " + base.path.string());
 
   // The copied prefix ends where the base's last payload does; its table and
   // trailer are replaced, not kept.
-  uint64_t prefix = 0;
-  for (const Entry& e : bt.entries) prefix = std::max(prefix, e.off + e.len);
+  uint64_t prefix = bt.payload_end();
 
   std::vector<std::string> ids;
   std::vector<uint64_t> sizes;

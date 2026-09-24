@@ -17,62 +17,27 @@
 #include <string>
 #include <vector>
 
+#include "backend/policy.h"
 #include "gpu/caps.h"
 #include "gpu/nvidia.h"
 #include "gpu/probe.h"
 #include "player/doctor.h"
-#include "player/policy.h"
-#include "session/session.h"
+#include "session/play.h"
 #include "util/paths.h"
 #include "util/pe.h"
+#include "support/check.h"
+#include "support/files.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
-using player::AuthorBackend;
-using player::Backend;
+using backend::AuthorBackend;
+using backend::Backend;
 using gpu::NvidiaState;
 using gpu::VulkanLevel;
 
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
-
-static bool contains(const std::string& s, const std::string& what) {
-  return s.find(what) != std::string::npos;
-}
-
-static void write(const fs::path& p, const std::string& s) {
-  fs::create_directories(p.parent_path());
-  std::ofstream(p, std::ios::binary) << s;
-}
-
-static std::string slurp(const fs::path& p) {
-  std::ifstream f(p, std::ios::binary);
-  std::stringstream ss;
-  ss << f.rdbuf();
-  return ss.str();
-}
+using kgtest::contains;
+using kgtest::slurp;
+using kgtest::write_file;
 
 static std::string env_of(const std::vector<std::pair<std::string, std::string>>& env,
                           const std::string& key) {
@@ -333,28 +298,28 @@ static fs::path nvidia_host(const fs::path& tmp, const std::string& name, const 
                             const std::string& libver, bool manifests = true) {
   fs::path root = tmp / name;
   fs::remove_all(root);
-  if (!kver.empty()) write(root / "sys/module/nvidia/version", kver + "\n");
+  if (!kver.empty()) write_file(root / "sys/module/nvidia/version", kver + "\n");
   fs::path lib = root / "usr/lib/x86_64-linux-gnu";
   fs::create_directories(lib);
   if (!libver.empty()) {
-    for (const char* l : kLibs) write(lib / (std::string(l) + "." + libver), "elf");
+    for (const char* l : kLibs) write_file(lib / (std::string(l) + "." + libver), "elf");
   }
-  write(lib / "libnvidia-egl-wayland.so.1.1.20", "elf");
+  write_file(lib / "libnvidia-egl-wayland.so.1.1.20", "elf");
   fs::create_symlink("libnvidia-egl-wayland.so.1.1.20", lib / "libnvidia-egl-wayland.so.1");
   // A stale SONAME link from the last driver, which must not be followed.
   fs::create_symlink("libGLX_nvidia.so.1.0", lib / "libGLX_nvidia.so.0");
-  write(lib / "libGLX_mesa.so.0", "host mesa");
-  write(lib / "libvulkan_radeon.so", "host mesa");
+  write_file(lib / "libGLX_mesa.so.0", "host mesa");
+  write_file(lib / "libvulkan_radeon.so", "host mesa");
   if (manifests) {
-    write(root / "usr/share/vulkan/icd.d/nvidia_icd.json",
-          R"({"file_format_version":"1.0.1","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.4.303"}})");
-    write(root / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
-          R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
-    write(root / "usr/share/glvnd/egl_vendor.d/10_nvidia.json",
-          R"({"ICD":{"library_path":"libEGL_nvidia.so.0"}})");
-    write(root / "usr/share/glvnd/egl_vendor.d/50_mesa.json", R"({"ICD":{"library_path":"libEGL_mesa.so.0"}})");
-    write(root / "usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
-          R"({"ICD":{"library_path":"libnvidia-egl-wayland.so.1"}})");
+    write_file(root / "usr/share/vulkan/icd.d/nvidia_icd.json",
+               R"({"file_format_version":"1.0.1","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.4.303"}})");
+    write_file(root / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+               R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
+    write_file(root / "usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+               R"({"ICD":{"library_path":"libEGL_nvidia.so.0"}})");
+    write_file(root / "usr/share/glvnd/egl_vendor.d/50_mesa.json", R"({"ICD":{"library_path":"libEGL_mesa.so.0"}})");
+    write_file(root / "usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+               R"({"ICD":{"library_path":"libnvidia-egl-wayland.so.1"}})");
   }
   return root;
 }
@@ -419,7 +384,7 @@ static void test_nvidia_mismatch(const fs::path& tmp) {
   // One library left behind at the old release is as much a mismatch.
   fs::path mixed = nvidia_host(tmp, "nv-mixed", "595.84", "595.84");
   fs::remove(mixed / "usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.84");
-  write(mixed / "usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.590.48", "elf");
+  write_file(mixed / "usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.590.48", "elf");
   CHECK(gpu::capture_nvidia(gpu::Host::fixture(mixed)).state == NvidiaState::Mismatch);
 }
 
@@ -441,8 +406,8 @@ static void test_nvidia_missing_and_absent(const fs::path& tmp) {
 
   // The oldest drivers publish only /proc/driver/nvidia/version.
   fs::path proc = nvidia_host(tmp, "nv-proc", "", "470.256.02");
-  write(proc / "proc/driver/nvidia/version",
-        "NVRM version: NVIDIA UNIX x86_64 Kernel Module  470.256.02  Thu May  2 14:37:44 UTC 2024\n");
+  write_file(proc / "proc/driver/nvidia/version",
+             "NVRM version: NVIDIA UNIX x86_64 Kernel Module  470.256.02  Thu May  2 14:37:44 UTC 2024\n");
   gpu::Nvidia p = gpu::capture_nvidia(gpu::Host::fixture(proc));
   CHECK_EQ(p.kernel_version, std::string("470.256.02"));
   CHECK(p.state == NvidiaState::Ok);
@@ -461,20 +426,20 @@ static void test_nvidia_missing_and_absent(const fs::path& tmp) {
 static void test_nvidia_current_driver(const fs::path& tmp) {
   fs::path root = nvidia_host(tmp, "nv-595", "595.84", "595.84");
   fs::path lib = root / "usr/lib/x86_64-linux-gnu";
-  write(lib / "libnvidia-allocator.so.595.84", "elf");
+  write_file(lib / "libnvidia-allocator.so.595.84", "elf");
   fs::create_symlink("libnvidia-allocator.so.595.84", lib / "libnvidia-allocator.so.1");
   for (const char* p : {"libnvidia-egl-xcb.so", "libnvidia-egl-xlib.so", "libnvidia-egl-wayland2.so"}) {
     std::string real = std::string(p) + (std::string(p) == "libnvidia-egl-wayland2.so" ? ".1.0.1" : ".1.0.5");
-    write(lib / real, "elf");
+    write_file(lib / real, "elf");
     fs::create_symlink(real, lib / (std::string(p) + ".1"));
   }
-  write(root / "usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json",
-        R"({"ICD":{"library_path":"libnvidia-egl-xcb.so.1"}})");
-  write(root / "usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json",
-        R"({"ICD":{"library_path":"libnvidia-egl-wayland2.so.1"}})");
+  write_file(root / "usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json",
+             R"({"ICD":{"library_path":"libnvidia-egl-xcb.so.1"}})");
+  write_file(root / "usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json",
+             R"({"ICD":{"library_path":"libnvidia-egl-wayland2.so.1"}})");
   // The same Vulkan manifest in /etc as well as /usr/share.
-  write(root / "etc/vulkan/icd.d/nvidia_icd.json",
-        R"({"ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.4.303"}})");
+  write_file(root / "etc/vulkan/icd.d/nvidia_icd.json",
+             R"({"ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.4.303"}})");
 
   gpu::Nvidia n = gpu::capture_nvidia(gpu::Host::fixture(root));
   CHECK(n.state == NvidiaState::Ok);
@@ -494,23 +459,23 @@ static void test_nvidia_current_driver(const fs::path& tmp) {
 
   // An allocator left at the last release is a mismatch like any other.
   fs::path stale = nvidia_host(tmp, "nv-595-stale", "595.84", "595.84");
-  write(stale / "usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.590.48", "elf");
+  write_file(stale / "usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.590.48", "elf");
   CHECK(gpu::capture_nvidia(gpu::Host::fixture(stale)).state == NvidiaState::Mismatch);
 
   // NixOS: every file in /run/opengl-driver/lib is a link into the store,
   // and egl-wayland is still taken.
   fs::path nix = tmp / "nv-nix";
   fs::remove_all(nix);
-  write(nix / "sys/module/nvidia/version", "595.84\n");
+  write_file(nix / "sys/module/nvidia/version", "595.84\n");
   fs::path store = nix / "nix/store/abc-nvidia-x11-595.84/lib";
   fs::path drv = nix / "run/opengl-driver/lib";
   fs::create_directories(drv);
   for (const char* l : kLibs) {
     std::string f = std::string(l) + ".595.84";
-    write(store / f, "elf");
+    write_file(store / f, "elf");
     fs::create_symlink(store / f, drv / f);
   }
-  write(store / "libnvidia-egl-wayland.so.1.1.21", "elf");
+  write_file(store / "libnvidia-egl-wayland.so.1.1.21", "elf");
   fs::create_symlink(store / "libnvidia-egl-wayland.so.1.1.21", drv / "libnvidia-egl-wayland.so.1.1.21");
   gpu::Nvidia nn = gpu::capture_nvidia(gpu::Host::fixture(nix));
   CHECK(nn.state == NvidiaState::Ok);
@@ -524,13 +489,13 @@ static void test_nvidia_current_driver(const fs::path& tmp) {
 static void test_materialize_routes_mesa(const fs::path& tmp) {
   fs::path root = nvidia_host(tmp, "nv-route", "595.84", "595.84");
   fs::path runtime = tmp / "runtime";
-  write(runtime / "usr/lib/x86_64-linux-gnu/libvulkan_radeon.so", "ours");
-  write(runtime / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
-        R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
-  write(runtime / "usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
-        R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so"}})");
-  write(runtime / "usr/share/vulkan/icd.d/radeon_icd.i686.json", R"({"ICD":{"library_path":"x"}})");
-  write(runtime / "usr/share/glvnd/egl_vendor.d/50_mesa.json", R"({"ICD":{"library_path":"libEGL_mesa.so.0"}})");
+  write_file(runtime / "usr/lib/x86_64-linux-gnu/libvulkan_radeon.so", "ours");
+  write_file(runtime / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+             R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
+  write_file(runtime / "usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+             R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so"}})");
+  write_file(runtime / "usr/share/vulkan/icd.d/radeon_icd.i686.json", R"({"ICD":{"library_path":"x"}})");
+  write_file(runtime / "usr/share/glvnd/egl_vendor.d/50_mesa.json", R"({"ICD":{"library_path":"libEGL_mesa.so.0"}})");
 
   gpu::Report r = gpu::probe(gpu::Host::fixture(root, {{"DISPLAY", ":0"}}));
   CHECK(r.nvidia.usable());
@@ -553,9 +518,9 @@ static void test_materialize_routes_mesa(const fs::path& tmp) {
   // is mounted elsewhere, and its manifests go beside this runtime's rather
   // than over them: the running game's still name its own Mesa.
   fs::path newer = tmp / "runtime-1.1";
-  write(newer / "usr/lib/x86_64-linux-gnu/libvulkan_radeon.so", "theirs");
-  write(newer / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
-        R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
+  write_file(newer / "usr/lib/x86_64-linux-gnu/libvulkan_radeon.so", "theirs");
+  write_file(newer / "usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+             R"({"ICD":{"library_path":"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so"}})");
   gpu::Report r2 = gpu::probe(gpu::Host::fixture(root, {{"DISPLAY", ":0"}}));
   gpu::materialize(r2, tmp / "gl-route", newer);
   CHECK(contains(slurp(mesa / "radeon_icd.x86_64.json"),
@@ -564,7 +529,7 @@ static void test_materialize_routes_mesa(const fs::path& tmp) {
   CHECK(!contains(env_of(r2.env, "VK_DRIVER_FILES"), "mesa-" + state_key(runtime)));
   // The same runtime again leaves each manifest in place, whole, and takes
   // away one the runtime no longer has.
-  write(mesa / "gone_icd.x86_64.json", "{}");
+  write_file(mesa / "gone_icd.x86_64.json", "{}");
   gpu::Report r3 = gpu::probe(gpu::Host::fixture(root, {{"DISPLAY", ":0"}}));
   gpu::materialize(r3, tmp / "gl-route", runtime);
   CHECK_EQ(env_of(r3.env, "VK_DRIVER_FILES"), vk);
@@ -687,34 +652,34 @@ static void test_gamescope_and_session(const fs::path& tmp) {
 
   gpu::HostCaps c;
   c.gamescope = true;
-  CHECK(player::display_path(c) == player::DisplayPath::GamescopeDirect);
+  CHECK(backend::display_path(c) == backend::DisplayPath::GamescopeDirect);
   c.gamescope = false;
-  CHECK(player::display_path(c) == player::DisplayPath::NestedWeston);
+  CHECK(backend::display_path(c) == backend::DisplayPath::NestedWeston);
 }
 
 // A whole machine: DRM, sound, input and FUSE, all from a fixture tree.
 static void test_probe_caps(const fs::path& tmp) {
   fs::path root = tmp / "host-amd";
   fs::remove_all(root);
-  write(root / "sys/class/drm/card0/device/vendor", "0x1002\n");
+  write_file(root / "sys/class/drm/card0/device/vendor", "0x1002\n");
   fs::create_directories(root / "sys/bus/pci/drivers/amdgpu");
   fs::create_symlink("../../../../bus/pci/drivers/amdgpu", root / "sys/class/drm/card0/device/driver");
   fs::create_directories(root / "sys/class/drm/card0/device/drm/renderD128");
   fs::create_directories(root / "sys/class/drm/card0-DP-1");  // a connector, not a card
-  write(root / "dev/dri/renderD128", "");
-  write(root / "run/user/1000/pulse/native", "");
-  write(root / "run/user/1000/pipewire-0", "");
-  write(root / "run/user/1000/wayland-0", "");
-  write(root / "dev/input/event0", "");
-  write(root / "dev/input/event1", "");
-  write(root / "dev/input/event5", "");  // a keyboard: never counted
+  write_file(root / "dev/dri/renderD128", "");
+  write_file(root / "run/user/1000/pulse/native", "");
+  write_file(root / "run/user/1000/pipewire-0", "");
+  write_file(root / "run/user/1000/wayland-0", "");
+  write_file(root / "dev/input/event0", "");
+  write_file(root / "dev/input/event1", "");
+  write_file(root / "dev/input/event5", "");  // a keyboard: never counted
   if (geteuid() != 0) fs::permissions(root / "dev/input/event5", fs::perms::none);
   fs::create_directories(root / "dev/input/by-id");
   fs::create_symlink("../event0", root / "dev/input/by-id/usb-Pad_One-event-joystick");
   fs::create_symlink("../event1", root / "dev/input/by-id/usb-Pad_Two-event-joystick");
   fs::create_symlink("../event5", root / "dev/input/by-id/usb-Some_Keyboard-event-kbd");
-  write(root / "dev/fuse", "");
-  write(root / "usr/bin/fusermount3", "");
+  write_file(root / "dev/fuse", "");
+  write_file(root / "usr/bin/fusermount3", "");
 
   gpu::Host h = gpu::Host::fixture(root, {{"XDG_RUNTIME_DIR", "/run/user/1000"},
                                           {"WAYLAND_DISPLAY", "wayland-0"},
@@ -774,9 +739,9 @@ static void test_probe_caps(const fs::path& tmp) {
 
   // An NVIDIA machine whose driver does not match: no GPU to be had.
   fs::path nv = nvidia_host(tmp, "host-nv-bad", "595.84", "590.48");
-  write(nv / "sys/class/drm/card0/device/vendor", "0x10de\n");
+  write_file(nv / "sys/class/drm/card0/device/vendor", "0x10de\n");
   fs::create_directories(nv / "sys/class/drm/card0/device/drm/renderD128");
-  write(nv / "dev/dri/renderD128", "");
+  write_file(nv / "dev/dri/renderD128", "");
   gpu::Host hn = gpu::Host::fixture(nv, {{"DISPLAY", ":0"}});
   gpu::Report gn = gpu::probe(hn);
   CHECK(gn.nvidia.state == NvidiaState::Mismatch);
@@ -791,9 +756,9 @@ static void test_probe_caps(const fs::path& tmp) {
   CHECK(!cn.gpu_usable());
 
   // The same, on a laptop whose Intel half still works.
-  write(nv / "sys/class/drm/card1/device/vendor", "0x8086\n");
+  write_file(nv / "sys/class/drm/card1/device/vendor", "0x8086\n");
   fs::create_directories(nv / "sys/class/drm/card1/device/drm/renderD129");
-  write(nv / "dev/dri/renderD129", "");
+  write_file(nv / "dev/dri/renderD129", "");
   gpu::Probes intel;
   intel.vulkaninfo = [] {
     return std::optional<std::string>(
@@ -913,35 +878,35 @@ static void test_backend_table() {
   };
 
   for (const Row& r : rows) {
-    player::Decision d = player::choose_backend(r.author, r.imports, r.host, r.needs_gpu);
-    ++checks;
+    backend::Decision d = backend::choose_backend(r.author, r.imports, r.host, r.needs_gpu);
+    ++kgtest::checks;
     if (d.backend != r.want) {
-      ++failures;
+      ++kgtest::failures;
       std::fprintf(stderr, "  FAIL backend table: %s -> %s, wanted %s (%s)\n", r.what,
-                   player::backend_name(d.backend), player::backend_name(r.want), d.reason.c_str());
+                   backend::backend_name(d.backend), backend::backend_name(r.want), d.reason.c_str());
     }
     CHECK(!d.reason.empty());
   }
 
-  player::Decision refused = player::choose_backend(
+  backend::Decision refused = backend::choose_backend(
       A, d3d9, caps(V14, true, NvidiaState::Mismatch, false), true);
   CHECK(contains(refused.reason, "needs a GPU"));
   CHECK(contains(refused.reason, "NVIDIA"));
-  player::Decision soft = player::choose_backend(
+  backend::Decision soft = backend::choose_backend(
       A, d3d9, caps(V14, true, NvidiaState::Mismatch, false), false);
   CHECK(contains(soft.reason, "software rendering"));
 
-  CHECK(player::parse_author_backend("dxvk") == AuthorBackend::Dxvk);
-  CHECK(player::parse_author_backend("wined3d-vk") == AuthorBackend::WineD3DVulkan);
-  CHECK(player::parse_author_backend("wined3d-gl") == AuthorBackend::WineD3DGL);
-  CHECK(player::parse_author_backend("cnc-ddraw") == AuthorBackend::CncDdraw);
-  CHECK(player::parse_author_backend("auto") == AuthorBackend::Auto);
-  CHECK(player::parse_author_backend("dgvoodoo") == AuthorBackend::Auto);
+  CHECK(backend::parse_author_backend("dxvk") == AuthorBackend::Dxvk);
+  CHECK(backend::parse_author_backend("wined3d-vk") == AuthorBackend::WineD3DVulkan);
+  CHECK(backend::parse_author_backend("wined3d-gl") == AuthorBackend::WineD3DGL);
+  CHECK(backend::parse_author_backend("cnc-ddraw") == AuthorBackend::CncDdraw);
+  CHECK(backend::parse_author_backend("auto") == AuthorBackend::Auto);
+  CHECK(backend::parse_author_backend("dgvoodoo") == AuthorBackend::Auto);
 }
 
-static bool has_reg(const player::Settings& s, const std::string& name, const std::string& data,
+static bool has_reg(const backend::Plan& s, const std::string& name, const std::string& data,
                     bool dword) {
-  for (const player::RegValue& v : s.registry) {
+  for (const backend::RegValue& v : s.registry) {
     if (v.name == name && v.data == data && v.dword == dword) return true;
   }
   return false;
@@ -949,9 +914,9 @@ static bool has_reg(const player::Settings& s, const std::string& name, const st
 
 static void test_settings() {
   gpu::HostCaps c = caps(VulkanLevel::V1_4);
-  auto with = [&](Backend b) { return player::settings_for(player::Decision{b, "because"}, c); };
+  auto with = [&](Backend b) { return backend::settings_for(backend::Decision{b, "because"}, c); };
 
-  player::Settings d3 = with(Backend::Dxvk3);
+  backend::Plan d3 = with(Backend::Dxvk3);
   CHECK(d3.dll_dirs == std::vector<std::string>{"opt/dxvk-3"});
   CHECK(std::find(d3.dlls.begin(), d3.dlls.end(), "d3d9") != d3.dlls.end());
   CHECK(std::find(d3.dlls.begin(), d3.dlls.end(), "d3d8") != d3.dlls.end());
@@ -960,18 +925,18 @@ static void test_settings() {
   CHECK_EQ(env_of(d3.env, "DXVK_LOG_LEVEL"), std::string("none"));
   CHECK(!has_reg(d3, "renderer", "vulkan", false));
 
-  player::Settings d2 = with(Backend::Dxvk2);
+  backend::Plan d2 = with(Backend::Dxvk2);
   CHECK(!d2.dll_dirs.empty() && d2.dll_dirs[0] == "opt/dxvk-2");
 
   CHECK(has_reg(with(Backend::WineD3DVulkan), "renderer", "vulkan", false));
   CHECK(has_reg(with(Backend::WineD3DGL), "renderer", "gl", false));
   CHECK(with(Backend::WineD3DVulkan).dll_overrides.empty());
 
-  player::Settings cnc = with(Backend::CncDdraw);
+  backend::Plan cnc = with(Backend::CncDdraw);
   CHECK(cnc.dlls == std::vector<std::string>{"ddraw"});
   CHECK_EQ(cnc.dll_overrides, std::string("ddraw=n,b"));
 
-  player::Settings sw = with(Backend::Software);
+  backend::Plan sw = with(Backend::Software);
   CHECK_EQ(env_of(sw.env, "LIBGL_ALWAYS_SOFTWARE"), std::string("1"));
   CHECK_EQ(env_of(sw.env, "GALLIUM_DRIVER"), std::string("llvmpipe"));
   CHECK(has_reg(sw, "renderer", "gl", false));
@@ -979,26 +944,26 @@ static void test_settings() {
   // What every choice shares: sound through pulse then alsa, pads through SDL.
   for (Backend b : {Backend::Dxvk3, Backend::Dxvk2, Backend::WineD3DVulkan, Backend::WineD3DGL,
                     Backend::CncDdraw, Backend::NativeGL, Backend::Software}) {
-    player::Settings s = with(b);
+    backend::Plan s = with(b);
     CHECK(has_reg(s, "Audio", "pulse,alsa", false));
     CHECK(has_reg(s, "DisableHidraw", "1", true));
     CHECK(has_reg(s, "Enable SDL", "1", true));
     CHECK(!s.refused());
   }
-  player::Settings no = with(Backend::Refuse);
+  backend::Plan no = with(Backend::Refuse);
   CHECK(no.refused());
   CHECK(no.registry.empty());
   CHECK(no.dlls.empty());
-  CHECK_EQ(player::audio_drivers(), std::string("pulse,alsa"));
+  CHECK_EQ(backend::audio_drivers(), std::string("pulse,alsa"));
 
   // plan() is the two together, including the display.
   gpu::HostCaps deck = caps(VulkanLevel::V1_3);
   deck.gamescope = true;
-  player::Settings p = player::plan(AuthorBackend::Auto, exe({"d3d9.dll"}), deck, false);
+  backend::Plan p = backend::plan(AuthorBackend::Auto, exe({"d3d9.dll"}), deck, false);
   CHECK(p.decision.backend == Backend::Dxvk2);
-  CHECK(p.display == player::DisplayPath::GamescopeDirect);
+  CHECK(p.display == backend::DisplayPath::GamescopeDirect);
 
-  std::string reg = player::registry_file(
+  std::string reg = backend::registry_file(
       {{"HKEY_CURRENT_USER\\Software\\Wine\\Direct3D", "renderer", false, "vulkan"},
        {"HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus", "DisableHidraw", true, "1"},
        {"HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus", "Enable SDL", true, "1"},
@@ -1017,13 +982,14 @@ static void test_settings() {
 // or mounted: here the game is not even installed, and the refusal is still
 // the answer rather than "not installed".
 static void test_session_refuses_first() {
-  session::Options o;
-  o.backend = player::plan(AuthorBackend::Auto, exe({"d3d9.dll"}),
-                           caps(VulkanLevel::V1_4, true, NvidiaState::Mismatch, false), true);
-  CHECK(o.backend->refused());
+  session::PlayRequest req;
+  req.id = "kretro-test-no-such-game";
+  req.backend.fixed = backend::plan(AuthorBackend::Auto, exe({"d3d9.dll"}),
+                                    caps(VulkanLevel::V1_4, true, NvidiaState::Mismatch, false), true);
+  CHECK(req.backend.fixed->refused());
   std::string said;
   try {
-    session::play(rt::Env{}, "kretro-test-no-such-game", o);
+    session::play(rt::Env{}, req);
   } catch (const std::exception& ex) {
     said = ex.what();
   }
@@ -1035,7 +1001,7 @@ static void test_session_refuses_first() {
 static void test_backend_from_fixture_pe() {
   gpu::HostCaps c = caps(VulkanLevel::V1_3);
   auto pick = [&](const std::vector<uint8_t>& b) {
-    return player::choose_backend(AuthorBackend::Auto, pe::parse(b), c, false).backend;
+    return backend::choose_backend(AuthorBackend::Auto, pe::parse(b), c, false).backend;
   };
   CHECK(pick(make_pe({"KERNEL32.dll", "d3d9.dll"})) == Backend::Dxvk2);
   CHECK(pick(make_pe({"DDRAW.dll", "WINMM.dll"})) == Backend::CncDdraw);
@@ -1072,9 +1038,9 @@ static void test_redact() {
 static void test_doctor_report(const fs::path& tmp) {
   namespace doc = player::doctor;
   fs::path root = nvidia_host(tmp, "doctor-host", "595.84", "590.48");
-  write(root / "etc/os-release", "NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n");
-  write(root / "proc/sys/kernel/osrelease", "7.0.0-31-generic\n");
-  write(root / "lib64/ld-linux-x86-64.so.2", "");
+  write_file(root / "etc/os-release", "NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n");
+  write_file(root / "proc/sys/kernel/osrelease", "7.0.0-31-generic\n");
+  write_file(root / "lib64/ld-linux-x86-64.so.2", "");
 
   doc::Inputs in;
   in.host = gpu::Host::fixture(root, {{"XDG_SESSION_TYPE", "x11"}, {"DISPLAY", ":0"}});
@@ -1136,7 +1102,7 @@ static void test_doctor_report(const fs::path& tmp) {
   fs::path log = tmp / "session.log";
   std::string many;
   for (int i = 1; i <= 100; ++i) many += "line " + std::to_string(i) + "\n";
-  write(log, many);
+  write_file(log, many);
   std::string tail = doc::tail_lines(log, 40);
   CHECK(contains(tail, "line 61\n"));
   CHECK(!contains(tail, "line 60\n"));
@@ -1171,11 +1137,9 @@ int main() {
     test_redact();
     test_doctor_report(tmp);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

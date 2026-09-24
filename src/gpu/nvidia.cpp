@@ -6,18 +6,13 @@
 #include <set>
 #include <sstream>
 
-#include <unistd.h>
+#include "files.h"
+#include "../util/text.h"
 
 namespace kg::gpu {
 namespace fs = std::filesystem;
 
 namespace {
-
-std::string trim(std::string s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return a == std::string::npos ? "" : s.substr(a, b - a + 1);
-}
 
 std::string read_all(const fs::path& p) {
   std::ifstream f(p, std::ios::binary);
@@ -25,8 +20,6 @@ std::string read_all(const fs::path& p) {
   ss << f.rdbuf();
   return ss.str();
 }
-
-bool starts_with(const std::string& s, const std::string& p) { return s.rfind(p, 0) == 0; }
 
 // Where distributions put the driver. Looked through rather than trusted to
 // be any one layout: Debian's multiarch, Fedora's lib64 and RPM Fusion's
@@ -151,17 +144,9 @@ std::vector<fs::path> manifests(const Host& h, const std::vector<fs::path>& dirs
   return out;
 }
 
-std::string join(const std::vector<std::string>& v, const char* sep) {
-  std::string s;
-  for (const std::string& x : v) {
-    if (!s.empty()) s += sep;
-    s += x;
-  }
-  return s;
-}
-
-}  // namespace
-
+// The version string the kernel module reports, or empty with no module.
+// /sys/module/nvidia/version first; /proc/driver/nvidia/version on the
+// oldest drivers, which do not publish the sysfs file.
 std::string nvidia_kernel_version(const Host& h) {
   std::ifstream sys(h.at("/sys/module/nvidia/version"));
   std::string v;
@@ -181,6 +166,8 @@ std::string nvidia_kernel_version(const Host& h) {
   return "";
 }
 
+}  // namespace
+
 Nvidia capture_nvidia(const Host& h) {
   Nvidia n;
   n.kernel_version = nvidia_kernel_version(h);
@@ -199,8 +186,8 @@ Nvidia capture_nvidia(const Host& h) {
     std::vector<std::pair<std::string, fs::path>> here;
     for (const fs::directory_entry& de : fs::directory_iterator(real, ec)) {
       std::string name = de.path().filename().string();
-      if (!starts_with(name, "libnvidia-") && !starts_with(name, "libGLX_nvidia.") &&
-          !starts_with(name, "libEGL_nvidia.")) {
+      if (!name.starts_with("libnvidia-") && !name.starts_with("libGLX_nvidia.") &&
+          !name.starts_with("libEGL_nvidia.")) {
         continue;
       }
       if (seen.insert(name).second) here.emplace_back(name, de.path());
@@ -215,7 +202,7 @@ Nvidia capture_nvidia(const Host& h) {
     fs::path exact;
     std::string other;
     for (const auto& [name, path] : files) {
-      if (!starts_with(name, prefix)) continue;
+      if (!name.starts_with(prefix)) continue;
       std::string suffix = name.substr(prefix.size());
       if (w.versioned) {
         if (suffix == v) {
@@ -279,51 +266,6 @@ Nvidia capture_nvidia(const Host& h) {
   return n;
 }
 
-namespace {
-fs::path temporary_beside(const fs::path& p) {
-  fs::path t = p;
-  t += "." + std::to_string(::getpid()) + ".tmp";
-  return t;
-}
-}  // namespace
-
-void replace_file(const fs::path& dst, const std::string& bytes) {
-  const fs::path tmp = temporary_beside(dst);
-  std::error_code ec;
-  {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    f << bytes;
-    if (!f) {
-      fs::remove(tmp, ec);
-      return;
-    }
-  }
-  fs::rename(tmp, dst, ec);
-  if (ec) fs::remove(tmp, ec);
-}
-
-void replace_symlink(const fs::path& target, const fs::path& link) {
-  const fs::path tmp = temporary_beside(link);
-  std::error_code ec;
-  fs::remove(tmp, ec);
-  fs::create_symlink(target, tmp, ec);
-  if (ec) return;
-  fs::rename(tmp, link, ec);
-  if (ec) fs::remove(tmp, ec);
-}
-
-void keep_only(const fs::path& dir, const std::set<std::string>& names) {
-  std::error_code ec;
-  std::vector<fs::path> gone;
-  for (const fs::directory_entry& de : fs::directory_iterator(dir, ec)) {
-    const std::string n = de.path().filename().string();
-    // Another start's temporaries, about to be renamed into place.
-    if (n.size() > 4 && n.compare(n.size() - 4, 4, ".tmp") == 0) continue;
-    if (!names.count(n)) gone.push_back(de.path());
-  }
-  for (const fs::path& p : gone) fs::remove_all(p, ec);
-}
-
 Routing route_nvidia(const Nvidia& n, const fs::path& dir) {
   Routing r;
   if (!n.usable()) return r;
@@ -348,7 +290,7 @@ Routing route_nvidia(const Nvidia& n, const fs::path& dir) {
     // from the host: the host's libGLX_nvidia.so.0 is exactly what goes stale
     // across an update and still points at the old release.
     for (const Want& w : wanted()) {
-      if (w.soname && starts_with(name, std::string(w.stem) + ".") && name != w.soname) {
+      if (w.soname && name.starts_with(std::string(w.stem) + ".") && name != w.soname) {
         replace_symlink(name, dir / w.soname);
         made.insert(w.soname);
       }

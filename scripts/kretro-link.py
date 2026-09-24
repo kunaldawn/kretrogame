@@ -17,7 +17,8 @@ out of this file at an offset and nothing the size of the runtime is ever
 copied. The same program links both files: kretro is linked with
 --player-base, the player base without it. A player is the player base with
 bundle.meta and games appended; kretro builds those (src/bundle/build.cpp), and
-src/bundle/toc.h is the definition of the format both writers follow.
+src/bundle/toc.h is the definition of the format both writers follow. The
+format is specified in docs/file-format.md.
 
 The table records a BLAKE3 for every payload. Python has no BLAKE3, so the
 hashes come from kretro-b3 (scripts/kretro-b3.c, built by the Makefile), or from

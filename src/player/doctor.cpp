@@ -13,18 +13,13 @@
 #include <set>
 #include <sstream>
 
-#include "policy.h"
+#include "../backend/policy.h"
+#include "../util/text.h"
 
 namespace kg::player::doctor {
 namespace fs = std::filesystem;
 
 namespace {
-
-std::string trim(std::string s) {
-  size_t a = s.find_first_not_of(" \t\r\n");
-  size_t b = s.find_last_not_of(" \t\r\n");
-  return a == std::string::npos ? "" : s.substr(a, b - a + 1);
-}
 
 std::string first_line(const fs::path& p) {
   std::ifstream f(p);
@@ -41,7 +36,11 @@ std::string distro(const gpu::Host& h) {
     while (std::getline(in, line)) {
       if (line.rfind("PRETTY_NAME=", 0) != 0) continue;
       std::string v = trim(line.substr(12));
-      if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'')) v = v.substr(1, v.size() - 2);
+      // The quotes off both ends, in place.
+      if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'')) {
+        v.erase(0, 1);
+        v.pop_back();
+      }
       return v;
     }
   }
@@ -72,9 +71,7 @@ bool word_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c
 // Replaces `needle` where it is a whole word, ignoring case.
 std::string replace_word(const std::string& s, const std::string& needle, const std::string& with) {
   if (needle.empty()) return s;
-  std::string ls = s, ln = needle;
-  std::transform(ls.begin(), ls.end(), ls.begin(), [](unsigned char c) { return std::tolower(c); });
-  std::transform(ln.begin(), ln.end(), ln.begin(), [](unsigned char c) { return std::tolower(c); });
+  std::string ls = to_lower(s), ln = to_lower(needle);
   std::string out;
   size_t i = 0;
   while (i < s.size()) {
@@ -132,7 +129,7 @@ Report collect(const Inputs& in) {
   if (g.wayland) disp.lines.push_back({"wayland", g.wayland_display});
   if (g.x11) disp.lines.push_back({"x11", g.x_display});
   disp.lines.push_back({"gamescope", yes_no(c.gamescope)});
-  disp.lines.push_back({"games shown", display_path_name(display_path(c))});
+  disp.lines.push_back({"games shown", backend::display_path_name(backend::display_path(c))});
   r.sections.push_back(disp);
 
   Section gfx{"graphics", {}};
@@ -172,7 +169,7 @@ Report collect(const Inputs& in) {
       {"mounting",
        {{"fuse", c.fuse() ? "available" : "not available"},
         {"used", c.mount_mode.empty() ? "unknown (not started by the bootstrap)" : c.mount_mode}}});
-  r.sections.push_back({"audio", {{"server", c.audio_server}, {"wine drivers", audio_drivers()}}});
+  r.sections.push_back({"audio", {{"server", c.audio_server}, {"wine drivers", backend::audio_drivers()}}});
   r.sections.push_back(
       {"input",
        {{"gamepads", count_of(c.input_readable, c.input_nodes, "connected gamepads readable")},
@@ -283,10 +280,31 @@ std::string tail_lines(const fs::path& file, size_t n) {
   return out;
 }
 
+bool save_redacted(const std::string& text, const fs::path& to) {
+  std::ofstream out(to);
+  out << redact(text);
+  return static_cast<bool>(out);
+}
+
+fs::path newest_file(const std::vector<fs::path>& candidates) {
+  fs::path newest;
+  fs::file_time_type when{};
+  std::error_code ec;
+  for (const fs::path& f : candidates) {
+    if (!fs::exists(f, ec)) continue;
+    fs::file_time_type t = fs::last_write_time(f, ec);
+    if (newest.empty() || t > when) {
+      newest = f;
+      when = t;
+    }
+  }
+  return newest;
+}
+
 gpu::Probes runtime_probes(const rt::Env& e) {
   gpu::Probes p;
   if (!e.valid()) return p;
-  auto run = [e](const char* prog, std::vector<std::string> args,
+  auto run = [e](const char* prog, const std::vector<std::string>& args,
                  const char* must) -> std::optional<std::string> {
     fs::path bin = rt::which(e, prog);
     if (bin.empty()) return std::nullopt;

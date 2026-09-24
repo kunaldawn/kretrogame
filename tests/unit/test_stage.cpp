@@ -11,36 +11,12 @@
 #include <sstream>
 #include <string>
 
-#include "gui/stage.h"
-#include "session/session.h"
+#include "gui/stage/stage.h"
+#include "session/compositor.h"
+#include "support/check.h"
 
 namespace fs = std::filesystem;
 using namespace kg;
-
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    ++checks;                                                                \
-    if (!(cond)) {                                                           \
-      ++failures;                                                            \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_EQ(a, b)                                                                   \
-  do {                                                                                   \
-    ++checks;                                                                            \
-    auto va_ = (a);                                                                      \
-    auto vb_ = (b);                                                                      \
-    if (!(va_ == vb_)) {                                                                 \
-      ++failures;                                                                        \
-      std::ostringstream os_;                                                            \
-      os_ << va_ << " != " << vb_;                                                       \
-      std::fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, os_.str().c_str()); \
-    }                                                                                    \
-  } while (0)
 
 // The three fields the stage needs out of the compositor, and their defaults.
 // The defaults matter as much as the fields: every existing caller - play, and
@@ -127,13 +103,13 @@ static void test_unmap_point(const fs::path&) {
   CHECK(!gui::unmap_point(500, -1, f, 800, 600, &x, &y));   // above the panel
 }
 
-// Exactly one install per launch used to work.
+// More than one install per launch has to work.
 //
-// The flag the I/O error handler sets was a process-wide bool, and the handler
-// fires at the end of every install: the compositor is torn down and the
-// display goes with it, which is the normal way an install ends rather than a
-// fault. Every later install then saw "X is dead" before it had opened
-// anything, and drew a black panel forever.
+// The I/O error handler fires at the end of every install: the compositor is
+// torn down and the display goes with it, which is the normal way an install
+// ends rather than a fault. Were the flag it sets a process-wide bool, every
+// later install would see "X is dead" before it had opened anything, and draw
+// a black panel forever.
 static void test_dead_displays(const fs::path&) {
   gui::DeadDisplays d;
   int a = 0, b = 0;
@@ -164,11 +140,11 @@ static void test_dead_displays(const fs::path&) {
   CHECK(!d.dead(first));
 }
 
-// A click that slips off the edge of the panel used to leave the installer
+// A click that slips off the edge of the panel must not leave the installer
 // with a mouse button held down for the rest of its life.
 //
-// Presses and releases were both forwarded only while the pointer was over the
-// picture, and the ordinary things a person does to an InstallShield dialog -
+// Forwarding presses and releases only while the pointer is over the picture
+// is not enough: the ordinary things a person does to an InstallShield dialog -
 // drag its scrollbar, click near the border and let go a pixel outside it -
 // send the down over the picture and the up somewhere else. Nothing in the
 // nested X server ever lifts a button but our own up.
@@ -246,11 +222,9 @@ int main() {
     test_dead_displays(tmp);
     test_held_input(tmp);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "  FAIL unexpected exception: %s\n", e.what());
-    ++failures;
+    kgtest::unexpected(e);
   }
 
   fs::remove_all(tmp);
-  std::fprintf(stderr, "\n%d checks, %d failed\n", checks, failures);
-  return failures == 0 ? 0 : 1;
+  return kgtest::finish();
 }

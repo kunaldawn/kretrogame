@@ -37,12 +37,8 @@ struct Device {
 struct Report {
   std::vector<Device> devices;
 
-  // NVIDIA proprietary, when present. The first four are the capture's own
-  // answers, kept as fields because the shelf's doctor page reads them.
+  // NVIDIA proprietary, when present.
   Nvidia nvidia;
-  bool nvidia_present = false;
-  std::string nvidia_version;               // e.g. "595.84"
-  std::vector<std::string> nvidia_libs;     // absolute host paths we linked
   std::filesystem::path nvidia_link_dir;    // <state>/gl/nvidia-<version>
 
   // What the runtime should be told.
@@ -54,7 +50,13 @@ struct Report {
   std::string wayland_display, x_display;
 
   std::vector<Problem> issues;              // what is wrong, and what to do
-  std::vector<std::string> problems;        // the same, one line each; empty means fine
+
+  // Views of the capture, for the shelf's doctor page. They are worked out
+  // from `nvidia` and `issues` on each call, so they cannot fall out of step.
+  bool nvidia_present() const { return nvidia.present(); }
+  const std::string& nvidia_version() const { return nvidia.kernel_version; }  // e.g. "595.84"
+  std::vector<std::string> nvidia_libs() const;     // absolute host paths we linked
+  std::vector<std::string> problem_lines() const;   // `issues`, one line each; empty means fine
 };
 
 // Reads the host. Does not modify anything.
@@ -78,8 +80,5 @@ void materialize(Report& r, const std::filesystem::path& gl_root,
                  const std::filesystem::path& runtime_root);
 
 const char* vendor_name(Vendor v);
-
-// The plain-language GPU section of `kretro doctor`.
-void print_report(const Report& r);
 
 }  // namespace kg::gpu

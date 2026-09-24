@@ -11,6 +11,9 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "../util/hash.h"
+#include "../util/text.h"
+
 namespace kg::player {
 namespace fs = std::filesystem;
 
@@ -226,11 +229,6 @@ PrefixResult ensure_prefix(const rt::Env& e, const fs::path& prefix, const fs::p
 
 namespace {
 
-std::string upper(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
-  return s;
-}
-
 // REGEDIT4 escapes backslashes and quotes inside a quoted string.
 std::string reg_quote(const std::string& s) {
   std::string o = "\"";
@@ -267,7 +265,7 @@ std::string key_registry(const bundle::GameMeta::Key& k) {
   std::string rest = path.find('\\') == std::string::npos ? "" : path.substr(path.find('\\') + 1);
   std::string hive;
   for (const auto& [name, full] : kHives) {
-    if (upper(first) == name) hive = full;
+    if (to_upper(first) == name) hive = full;
   }
   if (hive.empty()) {
     hive = "HKEY_LOCAL_MACHINE";
@@ -281,7 +279,7 @@ std::string key_registry(const bundle::GameMeta::Key& k) {
   // halves, Software\Classes is merged by Wine, and a path the author already
   // wrote with Wow6432Node in it is already there.
   if (k.view == "32" && hive == "HKEY_LOCAL_MACHINE") {
-    const std::string u = upper(rest);
+    const std::string u = to_upper(rest);
     const std::string sw = "SOFTWARE\\";
     if (u.rfind(sw, 0) == 0 && u.rfind(sw + "WOW6432NODE\\", 0) != 0 && u.rfind(sw + "CLASSES\\", 0) != 0) {
       rest = rest.substr(0, sw.size()) + "Wow6432Node\\" + rest.substr(sw.size());
@@ -290,6 +288,32 @@ std::string key_registry(const bundle::GameMeta::Key& k) {
 
   std::string name = k.registry_value == "@" ? "@" : reg_quote(k.registry_value);
   return "REGEDIT4\n\n[" + hive + "\\" + rest + "]\n" + name + "=" + reg_quote(k.value) + "\n";
+}
+
+void drop_host_device_links(const fs::path& prefix) {
+  std::error_code dl;
+  for (const fs::directory_entry& de : fs::directory_iterator(prefix / "dosdevices", dl)) {
+    const std::string n = de.path().filename().string();
+    if (n.size() == 3 && n.substr(1) == "::") fs::remove(de.path(), dl);
+  }
+}
+
+void apply_embedded_key(const rt::Env& wine_env, const fs::path& prefix, const bundle::GameMeta::Key& key,
+                        const std::function<void(const std::string&)>& say) {
+  std::string reg = key_registry(key);
+  fs::path marker = prefix / ".kretro-key";
+  std::string want = to_hex(hash_string(reg));
+  std::string have;
+  std::ifstream(marker) >> have;
+  if (have != want) {
+    std::ofstream(prefix / "drive_c" / ".kretro-key.reg", std::ios::trunc) << reg;
+    ProcResult r = rt::run(wine_env, rt::find_wine(wine_env.root), {"regedit", "/S", "C:\\.kretro-key.reg"});
+    std::error_code ec;
+    fs::remove(prefix / "drive_c" / ".kretro-key.reg", ec);
+    if (!r.ok()) throw std::runtime_error("could not put the author's key into the registry");
+    std::ofstream(marker, std::ios::trunc) << want << "\n";
+    say("the author's key is in the registry");
+  }
 }
 
 std::string place_extra_files(const std::vector<bundle::GameMeta::Dll>& files,
@@ -314,9 +338,7 @@ std::string place_extra_files(const std::vector<bundle::GameMeta::Dll>& files,
       out << f.data;
       if (!out) throw std::runtime_error("could not put " + f.name + " beside the game");
     }
-    std::string lower = f.name;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    std::string lower = to_lower(f.name);
     if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".dll") {
       overrides += (overrides.empty() ? "" : ";") + lower.substr(0, lower.size() - 4) + "=n,b";
     }
@@ -328,13 +350,9 @@ std::string exe_dir_in_tree(const Meta& m) {
   std::string want = m.run.exe;
   std::replace(want.begin(), want.end(), '\\', '/');
   while (!want.empty() && want.front() == '/') want.erase(want.begin());
-  auto low = [](std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-    return s;
-  };
   std::string path = want;
   for (const TreeEntry& e : m.tree.entries()) {
-    if (e.is_regular() && low(e.path) == low(want)) {
+    if (e.is_regular() && iequals(e.path, want)) {
       path = e.path;
       break;
     }

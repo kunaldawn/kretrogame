@@ -11,9 +11,9 @@
 #include <string_view>
 #include <vector>
 
-#include "../install/iso.h"
 #include "../rt/env.h"
 #include "container.h"
+#include "iso.h"
 
 namespace kg::disc {
 
@@ -51,6 +51,12 @@ std::string set_id_from(std::string_view name);
 // Materialises a candidate, normalises its data track and reads its identity.
 // With `rip_audio`, any audio tracks are ripped beside the ISO.
 Disc open(const rt::Env& e, const Candidate& c, const std::filesystem::path& work, bool rip_audio);
+
+// A mounted CD, or a disc somebody already extracted: the tree is the disc, so
+// there is nothing to materialise or normalise. Its size and prefix hash come
+// from the sorted listing of names and sizes, which is enough for assemble() to
+// tell two different discs apart.
+Disc open_directory(const std::filesystem::path& dir);
 
 // Groups opened discs into a set, moving duplicate dumps aside. An archive
 // holding three rips of one disc is one disc and two alternates, not a

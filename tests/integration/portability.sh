@@ -19,10 +19,11 @@
 # FUSE, unpacks - with `play <game> --dry-run`; which way the runtime was
 # reached is reported beside it.
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
+# Only the binaries go into the containers, and the commands run there are
+# inline: nothing in them sources this library.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 # KRETRO_PLAYER and KRETRO_PLAYER_GAME may be kept in tests/local.env.
-[ -f tests/local.env ] && . tests/local.env
+load_local_env
 
 MODE=kretro
 if [ "${1:-}" = player ]; then MODE=player; shift; fi
@@ -32,15 +33,11 @@ run_one() { [ -z "$only" ] || [ "$only" = "$1" ]; }
 BIN="${KRETRO_BIN:-build/kretro}"
 [ -x "$BIN" ] || { echo "no binary at $BIN - run: make kretro" >&2; exit 2; }
 
-PASS=0; FAIL=0
-ok()  { printf '  \033[32mok\033[0m    %s\n' "$1"; PASS=$((PASS+1)); }
-bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
-
 # An image that is not here and cannot be pulled is skipped, not failed: this
 # is a test of the binary, not of the network.
 have_image() {
   docker image inspect "$1" >/dev/null 2>&1 || docker pull -q "$1" >/dev/null 2>&1 ||
-    { printf '  --    %s: no image, and it cannot be pulled; skipped\n' "$1"; return 1; }
+    { note "$1: no image, and it cannot be pulled; skipped"; return 1; }
 }
 
 # Runs the binary in `image` and asserts it got as far as the bundled runtime.
@@ -124,29 +121,27 @@ if [ "$MODE" = kretro ]; then
   # whether shipping our own libc was necessary.
   run_one alpine && try "alpine   musl, extract fallback" alpine:latest
   run_one alpine && try "alpine   musl, FUSE mount      " alpine:latest "${FUSE_ARGS[@]}"
-  # A noexec /tmp used to stop the mount and the extraction together, because
-  # both ran the DwarFS tool from a file under it. The tool now runs from memory;
-  # what still has to be a file moves to wherever programs may run.
+  # A noexec /tmp would stop the mount and the extraction together if both ran
+  # the DwarFS tool from a file under it. The tool runs from memory; what still
+  # has to be a file moves to wherever programs may run.
   run_one alpine && try "alpine   FUSE, noexec /tmp     " alpine:latest "${FUSE_ARGS[@]}" \
     --tmpfs /tmp:rw,noexec,mode=1777
   run_one alpine && try "alpine   extract, noexec /tmp  " alpine:latest --tmpfs /tmp:rw,noexec,mode=1777
   run_one debian && try "debian   glibc, extract        " debian:trixie
   run_one fedora && try "fedora   glibc, extract        " fedora:latest
   run_one arch   && try "arch     glibc, extract        " archlinux:latest
-  printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-  [ "$FAIL" -eq 0 ]
+  finish
   exit
 fi
 
 # --- player mode -----------------------------------------------------------------
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/kretro-portability.XXXXXX")"
+scratch portability
+WORK="$SCRATCH"
 mkdir -m 700 "$WORK/run"
-cleanup() {
+scratch_cleanup() {
   awk -v w="$WORK" 'index($2, w "/") == 1 { print $2 }' /proc/self/mounts | sort -r |
     while read -r m; do fusermount3 -u "$m" 2>/dev/null || fusermount3 -u -z "$m" 2>/dev/null; done
-  rm -rf "$WORK"
 }
-trap cleanup EXIT
 
 GAME=tiny
 if [ -n "${KRETRO_PLAYER:-}" ]; then
@@ -192,5 +187,4 @@ run_one ubuntu && try_player "ubuntu   26.04, extract        " ubuntu:26.04
 run_one ubuntu && try_player "ubuntu   26.04, FUSE mount     " ubuntu:26.04 "${FUSE_ARGS[@]}"
 run_one ubuntu && try_player "ubuntu   24.04, extract        " ubuntu:24.04
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ]
+finish

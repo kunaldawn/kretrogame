@@ -1,180 +1,19 @@
 #include "player.h"
 
-#include <sys/statvfs.h>
-
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
+#include "../backend/policy.h"
 #include "../bundle/build.h"
-#include "../install/share.h"
+#include "../session/saves_transfer.h"
+#include "../util/env.h"
+#include "../util/format.h"
 #include "../util/paths.h"
 #include "../util/pe.h"
-#include "policy.h"
 
 namespace kg::player {
 namespace fs = std::filesystem;
-
-namespace {
-
-const char* var(const char* k) {
-  const char* v = std::getenv(k);
-  return (v && *v) ? v : nullptr;
-}
-
-std::string read_range(const fs::path& p, uint64_t off, uint64_t len) {
-  std::ifstream f(p, std::ios::binary);
-  if (!f) throw std::runtime_error("cannot read " + p.string());
-  f.seekg(static_cast<std::streamoff>(off));
-  std::string s(len, '\0');
-  f.read(s.data(), static_cast<std::streamsize>(len));
-  if (static_cast<uint64_t>(f.gcount()) != len) throw std::runtime_error(p.string() + " is shorter than its table says");
-  return s;
-}
-
-std::string human(uint64_t n) {
-  const char* u[] = {"B", "KB", "MB", "GB", "TB"};
-  double v = static_cast<double>(n);
-  int i = 0;
-  while (v >= 1000.0 && i < 4) {
-    v /= 1000.0;
-    ++i;
-  }
-  char b[32];
-  std::snprintf(b, sizeof(b), i == 0 ? "%.0f %s" : "%.1f %s", v, u[i]);
-  return b;
-}
-
-void say(const std::string& s) { std::fprintf(stderr, "  %s\n", s.c_str()); }
-
-}  // namespace
-
-// ---- the file -------------------------------------------------------------
-
-Bundle Bundle::open(const fs::path& self, const std::string& toc_env) {
-  Bundle b;
-  b.self = self;
-  try {
-    b.toc = bundle::read_toc(self);
-  } catch (const bundle::FormatError& ex) {
-    std::error_code ec;
-    throw std::runtime_error("This file is damaged or incomplete (" + std::string(ex.what()) +
-                             ", and it is " + std::to_string(fs::file_size(self, ec)) +
-                             " bytes). Download it again.");
-  }
-  if (!toc_env.empty()) {
-    unsigned long long off = 0, len = 0;
-    if (std::sscanf(toc_env.c_str(), "%llu:%llu", &off, &len) != 2 || off != b.toc.toc_off ||
-        len != b.toc.toc_len) {
-      throw std::runtime_error("This file changed while it was starting. Run it again.");
-    }
-  }
-  const bundle::Entry* m = b.toc.find(bundle::Kind::Meta);
-  if (!m) {
-    throw std::runtime_error("This is not a player: it carries no games. A player is built by "
-                             "kretro, on its Bundles page.");
-  }
-  std::string raw = read_range(self, b.toc.at(*m), m->len);
-  // The bootstrap checked the table; the table's hash of bundle.meta is how
-  // the table vouches for these bytes.
-  if (hash_string(raw) != m->blake3) {
-    throw std::runtime_error("This file is damaged: its description of its games does not match "
-                             "itself. Download it again.");
-  }
-  b.meta = bundle::BundleMeta::decode(raw);
-  // Every game bundle.meta lists has a pack, and verify_bundle proved so when
-  // the file was built; a file that has lost one since is a damaged file.
-  for (const bundle::GameMeta& g : b.meta.games) {
-    if (!b.toc.pack(g.id)) {
-      throw std::runtime_error("This file is damaged: it names " + g.name + " and does not carry it. "
-                               "Download it again.");
-    }
-  }
-  return b;
-}
-
-const bundle::GameMeta* Bundle::game(const std::string& id) const {
-  for (const bundle::GameMeta& g : meta.games) {
-    if (g.id == id) return &g;
-  }
-  return nullptr;
-}
-
-const bundle::Entry* Bundle::pack(const std::string& id) const { return toc.pack(id); }
-
-std::string Bundle::game_list() const {
-  std::string s;
-  for (const bundle::GameMeta& g : meta.games) s += (s.empty() ? "" : ", ") + g.id;
-  return s;
-}
-
-StateChoice settle_state(const Bundle& b, const fs::path& exe) {
-  StateChoice c = choose_state(exe, b.meta.id, var("XDG_DATA_HOME") ? var("XDG_DATA_HOME") : "",
-                               var("HOME") ? var("HOME") : "");
-  setenv("KRETRO_STATE", c.dir.c_str(), 1);
-  use_bundle_layout(b.meta.id);
-  if (!c.private_root.empty()) claim_private_dir(c.private_root);
-  std::error_code ec;
-  fs::create_directories(c.dir, ec);
-  if (ec) {
-    throw std::runtime_error("cannot make a place for this player's saves at " + c.dir.string() + ": " +
-                             ec.message());
-  }
-  return c;
-}
-
-StateChoice inherited_state(const Bundle& b, const fs::path& exe) {
-  const char* s = var("KRETRO_STATE");
-  if (!s) return settle_state(b, exe);
-  StateChoice c;
-  c.dir = s;
-  use_bundle_layout(b.meta.id);
-  return c;
-}
-
-std::map<std::string, std::string> gamepad_bindings(const std::map<std::string, std::string>& pack_input,
-                                                    const bundle::GameMeta& g, const GameSettings& s) {
-  std::map<std::string, std::string> binds = pack_input;
-  if (s.gamepad == "author") {
-    for (const auto& [k, v] : bundle::parse_gamepad(g.gamepad)) binds[k] = v;
-  }
-  return binds;
-}
-
-std::vector<std::string> unseen_warnings(const doctor::Report& rep, LauncherState& seen) {
-  std::vector<std::string> out;
-  for (const gpu::Problem& pr : rep.problems) {
-    if (pr.blocking()) continue;
-    if (seen.warnings_seen.insert(warning_key(pr.line())).second) out.push_back(pr.line());
-  }
-  return out;
-}
-
-uint64_t unpacked_estimate(const Meta& m) {
-  uint64_t n = m.tree.total_bytes() + m.system.bytes;
-  bool carries_discs = false;
-  for (const Meta::Disc& d : m.discs) carries_discs = carries_discs || d.embedded;
-  // A carried disc's tree is about its image's size; the fingerprints are
-  // the only sizes the pack records for them.
-  if (carries_discs) {
-    for (const DiscFingerprint& f : m.recipe.fingerprints) n += f.size;
-  }
-  return n;
-}
-
-uint64_t free_bytes(const fs::path& p) {
-  fs::path at = p;
-  std::error_code ec;
-  while (!at.empty() && !fs::exists(at, ec)) {
-    fs::path up = at.parent_path();
-    if (up == at) break;
-    at = up;
-  }
-  struct statvfs s {};
-  if (::statvfs(at.empty() ? "/" : at.c_str(), &s) != 0) return 0;
-  return static_cast<uint64_t>(s.f_bavail) * s.f_frsize;
-}
 
 // ---- the player -------------------------------------------------------------
 
@@ -182,7 +21,7 @@ Player::Player(Bundle b, rt::Env env, StateChoice st, gpu::Report gpu)
     : b_(std::move(b)), env_(std::move(env)), st_(std::move(st)), gpu_(std::move(gpu)) {}
 
 bool Player::no_fuse() const {
-  const char* m = var("KRETRO_MOUNT_MODE");
+  const char* m = env_nonempty("KRETRO_MOUNT_MODE");
   return m && std::string(m) == "extract";
 }
 
@@ -279,8 +118,8 @@ fs::path Player::unpack(const std::string& id, const fs::path& dir) const {
   const uint64_t need = unpacked_estimate(pk.meta()) + pk.header().body_len;
   const uint64_t have = free_bytes(where);
   if (have < need) {
-    throw std::runtime_error("Unpacking " + game(id).name + " needs " + human(need) + " in " +
-                             where.parent_path().string() + ", and there is " + human(have) + " free.");
+    throw std::runtime_error("Unpacking " + game(id).name + " needs " + fmt::bytes_si(need) + " in " +
+                             where.parent_path().string() + ", and there is " + fmt::bytes_si(have) + " free.");
   }
   session::unpack_body(pk, where);
   std::error_code ec;
@@ -302,18 +141,10 @@ const doctor::Inputs& Player::machine() const {
 }
 
 std::string Player::last_log(size_t lines) const {
-  fs::path newest;
-  fs::file_time_type when{};
-  std::error_code ec;
-  for (const bundle::GameMeta& g : b_.meta.games) {
-    fs::path log = game_home_dir(g.id) / "weston.log";
-    if (!fs::exists(log, ec)) continue;
-    fs::file_time_type t = fs::last_write_time(log, ec);
-    if (newest.empty() || t > when) {
-      newest = log;
-      when = t;
-    }
-  }
+  std::vector<fs::path> logs;
+  logs.reserve(b_.meta.games.size());
+  for (const bundle::GameMeta& g : b_.meta.games) logs.push_back(game_home_dir(g.id) / "weston.log");
+  fs::path newest = doctor::newest_file(logs);
   return newest.empty() ? "" : doctor::tail_lines(newest, lines);
 }
 
@@ -344,7 +175,7 @@ doctor::Report Player::doctor_report() const {
   return doctor::collect(in);
 }
 
-session::Outcome Player::play(const std::string& id, const PlayRequest& req) const {
+session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) const {
   const bundle::GameMeta& g = game(id);
   const bundle::Entry& e = entry(id);
   std::vector<std::pair<std::string, std::string>> pre;
@@ -352,9 +183,9 @@ session::Outcome Player::play(const std::string& id, const PlayRequest& req) con
   // A refusal needs no exe: no usable GPU, and the author said this game
   // needs one. Said before anything is hashed, mounted or copied.
   const doctor::Inputs& m = machine();
-  const AuthorBackend author = parse_author_backend(g.backend);
+  const backend::AuthorBackend author = backend::parse_author_backend(g.backend);
   {
-    Settings s = plan(author, pe::Imports{}, m.caps, g.needs_gpu);
+    backend::Plan s = backend::plan(author, pe::Imports{}, m.caps, g.needs_gpu);
     if (s.refused()) throw std::runtime_error(s.decision.reason);
   }
 
@@ -379,7 +210,7 @@ session::Outcome Player::play(const std::string& id, const PlayRequest& req) con
     if (!u.ready) {
       throw session::NeedsUnpack(
           "This machine cannot mount " + g.name + " (no FUSE), so it has to be unpacked to play. That "
-          "needs " + human(u.need) + " in " + u.where.parent_path().string() + " (" + human(u.free) +
+          "needs " + fmt::bytes_si(u.need) + " in " + u.where.parent_path().string() + " (" + fmt::bytes_si(u.free) +
           " free).");
     }
   }
@@ -423,24 +254,24 @@ session::Outcome Player::play(const std::string& id, const PlayRequest& req) con
     fs::remove_all(state_dir() / id / "extra", ec);
   }
 
-  PrefixResult pr = ensure_prefix(wine_env, game_prefix_dir(id), state_dir() / id / "prefix-before", say);
+  PrefixResult pr = ensure_prefix(wine_env, game_prefix_dir(id), state_dir() / id / "prefix-before", log_line);
   pre.emplace_back("prefix action", prefix_action_name(pr.action));
   if (!pr.snapshot.empty()) pre.emplace_back("prefix snapshot", pr.snapshot.string());
 
   const GameSettings gs = settings(id);
-  session::Options so;
-  so.source = src;
-  so.lock_held = true;
-  so.display = gs.display;
-  so.display_set = true;
-  so.fullscreen = req.fullscreen_set ? req.fullscreen : gs.fullscreen;
-  so.panel_w = req.panel_w;
-  so.panel_h = req.panel_h;
-  so.dry_run = req.dry_run;
+  session::PlayRequest req;
+  req.id = id;
+  req.source = src;
+  req.held_lock = &lock;
+  req.display.scaling = gs.display;
+  req.display.fullscreen = ov.fullscreen_set ? ov.fullscreen : gs.fullscreen;
+  req.display.panel_w = ov.panel_w;
+  req.display.panel_h = ov.panel_h;
+  req.dry_run = ov.dry_run;
   const gpu::HostCaps caps = m.caps;
   const bool needs_gpu = g.needs_gpu;
-  so.backend_for = [author, caps, needs_gpu](const fs::path& exe) {
-    return plan(author, pe::parse_file(exe), caps, needs_gpu);
+  req.backend.for_exe = [author, caps, needs_gpu](const fs::path& exe) {
+    return backend::plan(author, pe::parse_file(exe), caps, needs_gpu);
   };
 
   // After the discs, which take d: onwards in the order the pack names them.
@@ -449,48 +280,17 @@ session::Outcome Player::play(const std::string& id, const PlayRequest& req) con
     discs = open_pack(id).meta().discs.size();
   } catch (const std::exception&) {
   }
-  so.game_drive = static_cast<char>(std::max<size_t>('g', 'd' + discs));
-  if (so.game_drive > 'y') so.game_drive = 'y';
+  req.game_drive = static_cast<char>(std::max<size_t>('g', 'd' + discs));
+  if (req.game_drive > 'y') req.game_drive = 'y';
 
   const bundle::GameMeta* gm = &g;
-  so.after_prefix = [gm, extra_overrides](rt::Env& we, const fs::path& prefix, const fs::path&) {
-    // A device link a mount manager made before the system bus was taken
-    // away - by a player older than this one - still claims its letter, and
-    // Wine removes the drive link beside it whenever that device is empty.
-    // No game this player runs has a host device, so none of them stay.
-    std::error_code dl;
-    for (const fs::directory_entry& de : fs::directory_iterator(prefix / "dosdevices", dl)) {
-      const std::string n = de.path().filename().string();
-      if (n.size() == 3 && n.substr(1) == "::") fs::remove(de.path(), dl);
-    }
-    if (!extra_overrides.empty()) {
-      std::string cur;
-      for (const auto& kv : we.vars) {
-        if (kv.first == "WINEDLLOVERRIDES") cur = kv.second;
-      }
-      we.set("WINEDLLOVERRIDES", cur.empty() ? extra_overrides : cur + ";" + extra_overrides);
-    }
-    if (gm->key) {
-      // Once per prefix, like the installer's own keys: a game that later
-      // rewrites the value keeps what it wrote.
-      std::string reg = key_registry(*gm->key);
-      fs::path marker = prefix / ".kretro-key";
-      std::string want = to_hex(hash_string(reg));
-      std::string have;
-      std::ifstream(marker) >> have;
-      if (have != want) {
-        std::ofstream(prefix / "drive_c" / ".kretro-key.reg", std::ios::trunc) << reg;
-        ProcResult r = rt::run(we, rt::find_wine(we.root), {"regedit", "/S", "C:\\.kretro-key.reg"});
-        std::error_code ec;
-        fs::remove(prefix / "drive_c" / ".kretro-key.reg", ec);
-        if (!r.ok()) throw std::runtime_error("could not put the author's key into the registry");
-        std::ofstream(marker, std::ios::trunc) << want << "\n";
-        say("the author's key is in the registry");
-      }
-    }
+  req.hooks.after_prefix = [gm, extra_overrides](rt::Env& we, const fs::path& prefix, const fs::path&) {
+    drop_host_device_links(prefix);
+    if (!extra_overrides.empty()) we.append("WINEDLLOVERRIDES", extra_overrides, ';');
+    if (gm->key) apply_embedded_key(we, prefix, *gm->key, log_line);
   };
 
-  session::Outcome out = session::play(wine_env, id, so);
+  session::Outcome out = session::play(wine_env, req);
   out.plan.insert(out.plan.begin(), pre.begin(), pre.end());
   out.plan.insert(out.plan.begin(), {"state", state_dir().string()});
   return out;
@@ -498,12 +298,12 @@ session::Outcome Player::play(const std::string& id, const PlayRequest& req) con
 
 fs::path Player::export_saves(const std::string& id, const fs::path& out) const {
   game(id);
-  return install::export_saves(id, out, env_);
+  return session::export_saves(id, out);
 }
 
 void Player::import_saves(const std::string& id, const fs::path& in) const {
   game(id);
-  install::import_saves(id, in);
+  session::import_saves(id, in);
 }
 
 std::vector<fs::path> Player::license_files() const {
