@@ -55,6 +55,19 @@ void confine_home(Env& e, const std::filesystem::path& home);
 // confined to `home`, in that order.
 Env wine_env(const Env& base, const std::filesystem::path& prefix, const std::filesystem::path& home);
 
+// `base` with no display: for the Wine commands that get a prefix ready before
+// the nested compositor exists (wineboot, winecfg, reg, regedit). With the
+// host's display they draw on the real desktop: wineboot's "being updated"
+// dialog, and once the prefix names a virtual desktop, a full-screen "Wine
+// Desktop" that flashes up for every reg add. DISPLAY and WAYLAND_DISPLAY are
+// set to the empty string, not removed. Wine falls through to its Wayland
+// driver when DISPLAY is missing, and libwayland connects to "wayland-0" when
+// WAYLAND_DISPLAY is missing, so either one unset still reaches the host. An
+// empty name makes both connections fail, and Wine falls back to its null
+// driver, which is all these commands need. The runtime's prefix template is
+// built the same way.
+Env offscreen(const Env& base);
+
 // Finds a bundled program by name: bin, usr/bin, then Wine's own directories.
 std::filesystem::path which(const Env& e, const std::string& name);
 

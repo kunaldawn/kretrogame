@@ -29,6 +29,8 @@ int cmd_play(const rt::Env& e, std::vector<std::string>& a) {
   const gui::PanelSize ps = gui::desktop_size(false);
   req.display.panel_w = ps.w;
   req.display.panel_h = ps.h;
+  req.display.usable_w = ps.usable_w;
+  req.display.usable_h = ps.usable_h;
   // A partial override starts from the defaults, not from this game's
   // setting in config.toml.
   auto scaling_of = [](session::PlayRequest& r) -> config::Display& {

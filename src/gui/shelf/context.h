@@ -5,6 +5,7 @@
 
 #include <SDL.h>
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -55,15 +56,37 @@ struct ShelfContext {
   // Puts a screen up. The host's router; a page calls it rather than knowing
   // which pages there are.
   std::function<void(Screen)> go;
+  // What the host's letter `c` opens from the shelf ('a' the wizard, 'i'
+  // Import, 'l' Library, 's' Settings, 'd' Doctor, 'b' Bundles): the same
+  // actions typing the letter takes, for the shelf's sidebar to offer the
+  // mouse and the pad. Nothing while a job or an install is running.
+  std::function<void(char)> nav;
   bool quit = false, quit_after_wizard = false;
 
   // The collection again, from disk, keeping the selection in range.
   void reload();
+  // Counts the reloads: a session played, a game built, imported or
+  // uninstalled all end in one, so a page keeping a copy of something else
+  // it read from disk reads it again when this changes.
+  unsigned generation = 0;
   // Where `id` is in entries, or 0 when it is not there.
   size_t index_of(const std::string& id) const;
-  // Plays `id` there and then, in the middle of the frame, with the window
-  // hidden until the game is over.
-  void play(const std::string& id);
+  // Plays `id` on the worker, with what the session says in the job's
+  // modal: getting a fresh prefix ready takes a minute, and a window that
+  // vanished at the click said nothing about it. The window is hidden once
+  // the game's own screen is up, and comes back when the game is over.
+  // Nothing when a job is running. By value: the entry it came from goes
+  // when the collection is read again.
+  void play(std::string id);
+  // Called every frame by the host, on this thread: hides the window when
+  // the session says the game's screen is up.
+  void hide_for_game();
+  // Called by the modal on a finished job's frame: when that job was a game,
+  // the window comes back, the status says how it went, and a session that
+  // ended well closes the modal by itself.
+  void after_play();
+  // Whether the worker is playing a game.
+  bool playing() const { return !playing_.empty(); }
   // The Game screen, for `id`.
   void open_game(const std::string& id);
   // A job on the worker, its output in the log modal, so the window keeps
@@ -71,6 +94,16 @@ struct ShelfContext {
   void run_job(const std::string& title, std::function<void()> fn);
 
   const Texture* texture(const std::filesystem::path& p) { return textures.file(p); }
+
+ private:
+  // The game the worker is playing, or empty. The UI thread's own.
+  std::string playing_;
+  // Set by the worker when the game's screen is up; the UI thread hides the
+  // window, since SDL's window calls are its to make.
+  std::atomic<bool> screen_up_{false};
+  bool hidden_ = false;
+  // What the session came to, written by the worker under the job's lock.
+  std::string played_;
 };
 
 }  // namespace kg::gui::shelf

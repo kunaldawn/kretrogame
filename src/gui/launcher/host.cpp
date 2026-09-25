@@ -8,6 +8,7 @@
 #include <string>
 
 #include "../event_loop.h"
+#include "../focus.h"
 #include "../window.h"
 #include "launcher.h"
 
@@ -62,16 +63,25 @@ void LauncherHost::back() {
   }
 }
 
-// Escape and pad B both go back. Dropped files are not handled.
+// Escape and pad B both go back, but not from under a modal, which answers
+// them itself, nor out of a field being typed in, which Escape only leaves;
+// pad Start the same way opens the bundle's settings from the grid.
+// Dropped files are not handled.
 void LauncherHost::on_event(const SDL_Event& ev) {
-  if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) back();
-  if (ev.type == SDL_CONTROLLERBUTTONDOWN && ev.cbutton.button == SDL_CONTROLLER_BUTTON_B) back();
+  const bool esc = ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE;
+  const bool pad_b = ev.type == SDL_CONTROLLERBUTTONDOWN && ev.cbutton.button == SDL_CONTROLLER_BUTTON_B;
+  if ((esc || pad_b) && back_allowed()) back();
+  // The pad's Start opens the bundle's settings from the grid, as a
+  // console's menu button does: another way to the grid's settings button.
+  const bool start = ev.type == SDL_CONTROLLERBUTTONDOWN && ev.cbutton.button == SDL_CONTROLLER_BUTTON_START;
+  if (start && pages_.at(Screen::Grid) && back_allowed() && !ctx_.job.running()) pages_.go(Screen::Bundle);
 }
 
 // A finished job's continuation runs first, on this thread, and may start the
 // next job or change the screen. Then the page, then at most one modal over
 // it, in this order.
 void LauncherHost::frame() {
+  ctx_.hide_for_game();
   ctx_.finish_job();
   pages_.page().draw();
   if (ctx_.job.running()) working_modal(ctx_);

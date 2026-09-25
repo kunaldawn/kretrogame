@@ -1,5 +1,6 @@
 #include "wizard.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <exception>
 #include <string>
@@ -32,17 +33,21 @@ void Wizard::preset_offer() {
   if (preset_index_ >= presets_.size()) preset_index_ = 0;
   const install::Preset& p = presets_[preset_index_];
 
-  ImGui::Spacing();
+  section("recognised");
+  begin_badge_block(BadgeKind::Info);
   ImGui::TextWrapped("This looks like %s. Use what we know about it?", p.name.c_str());
+  // On the sentence's own left edge: the badge block already hangs it there.
   if (p.by_fingerprint) {
-    ImGui::TextDisabled("  these are the discs that manifest was written against");
+    ImGui::TextDisabled("these are the discs that manifest was written against");
   } else if (p.of > 1) {
-    ImGui::TextDisabled("  %zu of its %zu discs are here, matched by label", p.matched, p.of);
+    ImGui::TextDisabled("%zu of its %zu discs are here, matched by label", p.matched, p.of);
   } else {
-    ImGui::TextDisabled("  matched by disc label, not by fingerprint");
+    ImGui::TextDisabled("matched by disc label, not by fingerprint");
   }
+  end_badge_block();
+  vgap(4);
 
-  if (ImGui::Button("yes, prefill")) {
+  if (primary_button("yes, prefill")) {
     try {
       install::apply_preset(install::load_manifest(p.manifest), &draft_);
       // The fields below draw from the text buffers and write draft_ back on
@@ -76,7 +81,7 @@ void Wizard::preset_offer() {
   // corner.
   if (presets_.size() > 1) {
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(280.0f);
+    ImGui::SetNextItemWidth(field_width(280));
     if (ImGui::BeginCombo("##preset", presets_[preset_index_].name.c_str())) {
       for (size_t i = 0; i < presets_.size(); ++i) {
         bool sel = i == preset_index_;
@@ -86,13 +91,20 @@ void Wizard::preset_offer() {
       ImGui::EndCombo();
     }
   }
-  ImGui::Spacing();
+  vgap(10);
 }
 
 void Wizard::identity_page() {
-  PageWindow page("name it", "Esc back", big_);
+  PageWindow page(step_title("name it"), "Esc back", fonts_.big());
+  step_top();
+  begin_body();
 
+  // The page opens on the offer when there is one (the first thing on it),
+  // on the name while there is none to go on with, and on going on once the
+  // name is there: a text field is the default only while it is empty,
+  // where typing into it is plainly the next thing to do.
   preset_offer();
+  const bool offered = !presets_.empty() && !preset_settled_;
 
   // The disc says what it is called, more or less. A volume label is shouty
   // and abbreviated, so it is a first answer rather than an answer.
@@ -105,8 +117,17 @@ void Wizard::identity_page() {
     set_buf(id_buf_, sizeof(id_buf_), install::slug(best));
   }
 
-  ImGui::TextDisabled("name");
-  ImGui::SetNextItemWidth(560);
+  section("identity");
+  // Keys in a dim column of their own and the fields beside them, the way the
+  // rest of the terminal shows a record.
+  const bool fields = ImGui::BeginTable("fields", 2, ImGuiTableFlags_SizingFixedFit);
+  if (fields) {
+    ImGui::TableSetupColumn("key");
+    ImGui::TableSetupColumn("field", ImGuiTableColumnFlags_WidthStretch);
+    form_row("name");
+  }
+  const bool name_empty = name_buf_[0] == '\0';
+  ImGui::SetNextItemWidth(field_width(560));
   if (ImGui::InputText("##name", name_buf_, sizeof(name_buf_))) {
     // The id follows the name until the id is edited by hand, at which point
     // it stops following: renaming a game should not silently re-home its
@@ -117,14 +138,18 @@ void Wizard::identity_page() {
   }
   draft_.name = name_buf_;
 
-  ImGui::TextDisabled("id");
-  ImGui::SetNextItemWidth(560);
+  if (fields) form_row("id");
+  ImGui::SetNextItemWidth(field_width(560));
+  ImGui::PushStyleColor(ImGuiCol_Text, kCyan);
   ImGui::InputText("##id", id_buf_, sizeof(id_buf_));
+  ImGui::PopStyleColor();
   draft_.id = id_buf_;
-  ImGui::TextDisabled("the name of its pack, its saves and its Wine prefix");
+  ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+  ImGui::TextWrapped("the name of its pack, its saves and its Wine prefix");
+  ImGui::PopStyleColor();
 
-  ImGui::TextDisabled("year");
-  ImGui::SetNextItemWidth(160);
+  if (fields) form_row("year");
+  ImGui::SetNextItemWidth(field_width(160));
   if (ImGui::InputInt("##year", &year_)) {
     if (year_ < 0) year_ = 0;
   }
@@ -142,8 +167,18 @@ void Wizard::identity_page() {
 
   install::IdClash clash = install::id_clash(env_, draft_.id);
   if (clash.any()) {
-    ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
+    // Under the fields rather than among them, where the table's key column
+    // would squeeze a paragraph into a narrow strip.
+    if (fields) ImGui::EndTable();
+    vgap(6);
+    // Wrapped to the fields' measure, which is where the eye already is,
+    // rather than across the whole of a wide window.
+    const float wrap = ImGui::GetCursorPosX() + field_width(640);
+    begin_badge_block(BadgeKind::Warn);
+    ImGui::PushTextWrapPos(wrap);
+    // The headline in the warning's colour and the explanation in the text's,
+    // as every warning in the wizard is drawn.
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
     ImGui::TextWrapped("%s already names %s on this machine.", draft_.id.c_str(),
                        clash.sentence().c_str());
     ImGui::PopStyleColor();
@@ -152,30 +187,38 @@ void Wizard::identity_page() {
         "and keeps its saves. If this is a different game, give it a different id; the "
         "wizard will not quietly rename it for you, because overwriting a game is a "
         "decision rather than an accident.");
+    ImGui::PopTextWrapPos();
     std::string alt = install::next_free_id(env_, draft_.id);
-    if (ImGui::SmallButton(("use " + alt + " instead").c_str())) {
+    if (small_button(("use " + alt + " instead").c_str())) {
       set_buf(id_buf_, sizeof(id_buf_), alt);
       draft_.id = alt;
     }
+    end_badge_block();
+  } else if (fields) {
+    ImGui::EndTable();
   }
 
-  ImGui::Spacing();
+  vgap(6);
+  section("serial");
   ImGui::TextDisabled("serial, if the installer will ask for one");
-  ImGui::SetNextItemWidth(560);
-  if (serial_buf_[0] == '\0' && !draft_.id.empty()) {
+  ImGui::SetNextItemWidth(field_width(560));
+  if (serial_buf_[0] == '\0' && !draft_.id.empty() && keys_seen_.due(draft_.id)) {
     std::string known = install::key_for(install::load_keys(install::keys_file()), draft_.id);
     if (!known.empty()) set_buf(serial_buf_, sizeof(serial_buf_), known);
   }
+  ImGui::PushStyleColor(ImGuiCol_Text, kCyan);
   ImGui::InputText("##serial", serial_buf_, sizeof(serial_buf_));
+  ImGui::PopStyleColor();
   draft_.serial = serial_buf_;
+  ImGui::PushTextWrapPos(prose_wrap());
   ImGui::TextDisabled(
       "kept on this machine and shown back to you next to the installer that asks for it. "
       "It goes into no pack.");
+  ImGui::PopTextWrapPos();
 
-  ImGui::Spacing();
-  ImGui::PushFont(big_);
-  if (draft_.id.empty() || draft_.name.empty()) ImGui::BeginDisabled();
-  if (ImGui::Button("Next: what to run", ImVec2(-1, 60))) {
+  end_body();
+  const bool named = !draft_.id.empty() && !draft_.name.empty();
+  if (step_footer("Next: what to run", named, named && !offered && !name_empty)) {
     if (!draft_.serial.empty()) {
       std::vector<install::StoredKey> keys = install::load_keys(install::keys_file());
       install::put_key(keys, draft_.id, draft_.serial, "typed into the wizard");
@@ -197,8 +240,6 @@ void Wizard::identity_page() {
     }
     step_ = Step::What;
   }
-  if (draft_.id.empty() || draft_.name.empty()) ImGui::EndDisabled();
-  ImGui::PopFont();
 }
 
 }  // namespace kg::gui

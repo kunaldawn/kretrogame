@@ -209,7 +209,9 @@ PrefixResult ensure_prefix(const rt::Env& e, const fs::path& prefix, const fs::p
         "); keeping a copy of the old prefix's settings first");
     r.snapshot = snapshot_prefix(prefix, snapshots);
     fs::path wine = rt::find_wine(e.root);
-    rt::Env we = e;
+    // No display, or wineboot's "being updated" dialog comes up on the host's
+    // desktop; see rt::offscreen.
+    rt::Env we = rt::offscreen(e);
     we.set("WINEPREFIX", prefix.string());
     we.set("WINEDLLOVERRIDES", "mscoree,mshtml=");
     ProcOptions po;
@@ -307,7 +309,8 @@ void apply_embedded_key(const rt::Env& wine_env, const fs::path& prefix, const b
   std::ifstream(marker) >> have;
   if (have != want) {
     std::ofstream(prefix / "drive_c" / ".kretro-key.reg", std::ios::trunc) << reg;
-    ProcResult r = rt::run(wine_env, rt::find_wine(wine_env.root), {"regedit", "/S", "C:\\.kretro-key.reg"});
+    ProcResult r =
+        rt::run(rt::offscreen(wine_env), rt::find_wine(wine_env.root), {"regedit", "/S", "C:\\.kretro-key.reg"});
     std::error_code ec;
     fs::remove(prefix / "drive_c" / ".kretro-key.reg", ec);
     if (!r.ok()) throw std::runtime_error("could not put the author's key into the registry");

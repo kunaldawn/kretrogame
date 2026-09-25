@@ -31,4 +31,9 @@ class Host {
 // error handlers before it opens the window, and the player never does.
 void run_event_loop(const Window& w, Host& h);
 
+// Notes which device `ev` came from, for input_mode() (focus.h): a key or a
+// pad button shows the focus, a click, the wheel or a mouse moved more than a
+// few pixels stops insisting on it. run_event_loop calls it for every event.
+void note_input(const SDL_Event& ev);
+
 }  // namespace kg::gui

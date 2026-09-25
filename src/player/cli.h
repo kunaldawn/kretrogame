@@ -31,6 +31,7 @@ struct Command {
     Licenses,
     Help,
     Input,  // started by a session beside a game; not for people
+    Panel,  // run by the launcher to measure the panel; not for people
     Error,
   };
   Kind kind = Kind::Launcher;

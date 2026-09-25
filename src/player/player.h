@@ -64,7 +64,12 @@ inline constexpr const char* kSourceNote =
 struct PlayOverrides {
   bool dry_run = false;
   uint32_t panel_w = 0, panel_h = 0;
+  uint32_t usable_w = 0, usable_h = 0;  // the work area; 0 is the whole panel
   bool fullscreen_set = false, fullscreen = false;
+  // Each line the session says, besides stderr, and the moment the game's
+  // screen is up; see session::Hooks. On the thread play runs on.
+  std::function<void(const std::string& line)> say;
+  std::function<void()> screen_up;
 };
 
 class Player {

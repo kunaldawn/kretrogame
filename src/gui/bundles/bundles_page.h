@@ -2,9 +2,9 @@
 //
 // Eight steps, as the design lays them out - identity, games, each game, the
 // check list, size, rights, build, preview - drawn as one page with the steps
-// down its left side rather than as a wizard, because a bundle is revisited:
-// the second version of it is the first with one number changed, and a person
-// should be able to go straight to Build. Everything the page decides is in
+// across its top, every one of them a place to go rather than a gate to pass,
+// because a bundle is revisited: the second version of it is the first with
+// one number changed, and a person should be able to go straight to Build. Everything the page decides is in
 // src/bundle/builder.h, where it is tested; this directory draws it and holds
 // the two things a page has to - a worker thread for the build, and the
 // preview's running process. bundles_page.cpp is the wiring, and each step, or
@@ -24,6 +24,7 @@
 #include "../../bundle/builder/preview.h"
 #include "../../rt/env.h"
 #include "../shelf/scan.h"
+#include "../texture.h"
 #include "../window.h"
 #include "imgui.h"
 
@@ -31,7 +32,10 @@ namespace kg::gui {
 
 class Bundles {
  public:
-  Bundles(const rt::Env& e, Fonts fonts);
+  // `textures` shows each bundle's banner or first cover on its card in the
+  // list; with none (the tests draw the page with no window) the cards are
+  // their tint and title.
+  Bundles(const rt::Env& e, Fonts fonts, Textures* textures = nullptr);
   ~Bundles();
   Bundles(const Bundles&) = delete;
   Bundles& operator=(const Bundles&) = delete;
@@ -65,9 +69,24 @@ class Bundles {
   void build_step();
   void preview_step();
 
+  // One remembered bundle as a card in the list: its picture, title, version
+  // and games, when it was last built, and Open and Build again on it.
+  // `open` and `again` are set when those are asked for.
+  void bundle_card(const bundle::Draft& d, float w, float h, bool first, bool* open, bool* again);
+  // The card that makes a new bundle, the size of the others.
+  bool new_card(float w, float h);
+  const Texture* card_art(const bundle::Draft& d);
+  // Going to a step: what picking it on the stepper and the footer's Next do.
+  void go_to(Step s);
+
   void browser();
   void take_file(const std::filesystem::path& p);
   void trouble_line();
+  void step_more_below();
+  // A checkbox with a stronger outline than the theme's, so an unticked one
+  // reads as a box to tick; `compact` makes it as tall as a line of text, for
+  // one that sits beside a sentence rather than in a row of fields.
+  static bool tick_box(const char* label, bool* v, bool compact = false);
 
   // Opening, remembering and leaving a bundle.
   void start_new();
@@ -87,7 +106,8 @@ class Bundles {
   void start_preview();
 
   const rt::Env& env_;
-  ImFont* big_ = nullptr;
+  Fonts fonts_;
+  Textures* textures_ = nullptr;
 
   std::vector<bundle::Draft> remembered_;
   std::vector<std::string> unreadable_;
@@ -113,6 +133,9 @@ class Bundles {
 
   Browse browse_ = Browse::None;
   std::filesystem::path browse_dir_;
+  // The list the last frame showed, so a list just opened is scrolled into
+  // view once and then left where the author puts it.
+  Browse browse_shown_ = Browse::None;
 
   // Reading each game's executable out of its pack: a dwarfsextract per game,
   // on a thread of its own so the page does not stall while it runs.

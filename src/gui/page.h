@@ -16,7 +16,7 @@ class Page {
   virtual ~Page() = default;
   // Draws itself, Begin to End.
   virtual void draw() = 0;
-  // Escape, and pad B in the launcher. True when the page used it.
+  // Escape and pad B. True when the page used it.
   virtual bool back() { return false; }
   // A file dropped on the window. True when the page used it.
   virtual bool dropped(const std::filesystem::path&) { return false; }

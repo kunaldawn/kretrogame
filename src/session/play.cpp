@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -60,7 +61,25 @@ struct PlayState {
   std::time_t ended = 0;
 
   void plan(const std::string& k, const std::string& v) { outcome.plan.emplace_back(k, v); }
+
+  // A line for stderr, and for the caller's window when it has one.
+  void say(const std::string& line) const {
+    log_line(line);
+    if (req.hooks.say) req.hooks.say(line);
+  }
+  std::function<void(const std::string&)> sayer() const {
+    return [this](const std::string& line) { say(line); };
+  }
 };
+
+// Where a caller's Stop is heard. Between steps rather than inside one: a
+// step cut short is a prefix half made, and the next session would have to
+// tell that apart from one that is whole.
+void stop_if_asked(const PlayState& st) {
+  if (st.req.hooks.stop_requested && st.req.hooks.stop_requested()) {
+    throw std::runtime_error("stopped before " + st.id + " started");
+  }
+}
 
 // A refusal is said before anything is locked, mounted or started: there
 // is nothing for the person to wait through when the answer is already no.
@@ -104,7 +123,7 @@ void check_pack(PlayState& st, const Pack& pack) {
 void mount(PlayState& st, Layers& layers, const Pack& pack) {
   open_layers(layers, st.e, pack, st.req.source ? &*st.req.source : nullptr);
 
-  log_line(std::string("game directory: ") +
+  st.say(std::string("game directory: ") +
       (layers.writes_isolated() ? "overlay (writes captured live)" : "extracted (writes found at exit)"));
 
   st.plan("game directory", layers.writes_isolated() ? "overlay, writes captured live"
@@ -164,7 +183,7 @@ void link_install_dir(const PlayState& st, const Layers& layers) {
     fs::remove(link, ec);
     ec.clear();
     fs::create_directory_symlink(layers.merged, link, ec);
-    if (ec) log_line("warning: C:\\" + m.install.install_dir + " could not be pointed at the game");
+    if (ec) st.say("warning: C:\\" + m.install.install_dir + " could not be pointed at the game");
   }
 }
 
@@ -175,7 +194,7 @@ void build_wine_env_and_prefix(PlayState& st, const Layers& layers) {
 
   // image/system for a rooted pack, and nothing at all for a flat one: revision
   // 1 had nowhere to put these files, so there is nothing to look for.
-  session::prepare_prefix(st.e, st.prefix, st.home, m, /*apply_registry=*/true, log_line,
+  session::prepare_prefix(st.e, st.prefix, st.home, m, /*apply_registry=*/true, st.sayer(),
                           m.rooted() ? layers.image / "system" : fs::path{});
 }
 
@@ -201,12 +220,12 @@ void attach_discs(PlayState& st, const Layers& layers) {
         // Honest, and the same state the library already shows for a disc it
         // cannot find: the pack was built without this one, or predates packs
         // carrying their discs at all.
-        log_line("disc " + std::to_string(i + 1) + " (" + m.discs[i].label +
+        st.say("disc " + std::to_string(i + 1) + " (" + m.discs[i].label +
             ") is not in this pack; rebuild it to include the discs");
         continue;
       }
       disc::attach_cdrom(st.e, st.prefix, letter, tree);
-      log_line(std::string("  ") + static_cast<char>(std::toupper(letter)) + ": " + m.discs[i].label);
+      st.say(std::string("  ") + static_cast<char>(std::toupper(letter)) + ": " + m.discs[i].label);
       st.plan(std::string(1, static_cast<char>(std::toupper(letter))) + ":", "CD-ROM " + m.discs[i].label);
     }
   }
@@ -251,12 +270,12 @@ void apply_dgvoodoo(PlayState& st, const Layers& layers) {
       std::string ov = "d3d8,ddraw,d3dim=n";
       if (!m.runtime.dlloverrides.empty()) ov = m.runtime.dlloverrides + ";" + ov;
       st.we.set("WINEDLLOVERRIDES", ov);
-      log_line("dgVoodoo2: wrapping DirectX with the bundled copy");
+      st.say("dgVoodoo2: wrapping DirectX with the bundled copy");
     } else {
-      log_line("dgVoodoo2 was asked for but is not in this runtime.");
-      log_line("  It is not redistributable on the terms kretro ships under. Put its");
-      log_line("  MS/x86 DLLs and dgVoodoo.conf under opt/dgvoodoo in the runtime and");
-      log_line("  this will pick them up. Playing without it.");
+      st.say("dgVoodoo2 was asked for but is not in this runtime.");
+      st.say("  It is not redistributable on the terms kretro ships under. Put its");
+      st.say("  MS/x86 DLLs and dgVoodoo.conf under opt/dgvoodoo in the runtime and");
+      st.say("  this will pick them up. Playing without it.");
     }
   }
 }
@@ -275,9 +294,8 @@ void apply_renderer(const PlayState& st) {
   const std::string& renderer = st.req.backend.wined3d_renderer;
   if (!renderer.empty()) {
     fs::path wine = rt::find_wine(st.e.root);
-    rt::run(st.we, wine, {"reg", "add", "HKCU\\Software\\Wine\\Direct3D", "/v", "renderer",
-                          "/d", renderer, "/f"});
-    log_line("renderer backend: " + renderer);
+    rt::run(rt::offscreen(st.we), wine, {"reg", "add", "HKCU\\Software\\Wine\\Direct3D", "/v", "renderer", "/d", renderer, "/f"});
+    st.say("renderer backend: " + renderer);
   }
 }
 
@@ -288,12 +306,12 @@ void apply_renderer(const PlayState& st) {
 // toolkit into the packing tool and the unit tests.
 void geometry(PlayState& st) {
   const Meta& m = *st.m;
-  const uint32_t panel_w = st.req.display.panel_w;
-  const uint32_t panel_h = st.req.display.panel_h;
+  const config::Panel panel{st.req.display.panel_w, st.req.display.panel_h,
+                            st.req.display.usable_w, st.req.display.usable_h};
   config::Display want = st.req.display.scaling
                              ? *st.req.display.scaling
                              : config::for_game(config::load(config::config_file()), st.id);
-  st.geo = config::compute_geometry(m.run.width, m.run.height, panel_w, panel_h, want);
+  st.geo = config::compute_geometry(m.run.width, m.run.height, panel, want);
 
   // Native asks the game itself to render at the panel's resolution, so the
   // virtual desktop has to be re-sized after prepare_prefix set it from the
@@ -301,9 +319,8 @@ void geometry(PlayState& st) {
   if (st.geo.desktop_is_panel) {
     fs::path wine = rt::find_wine(st.e.root);
     std::string g = std::to_string(st.geo.logical_w) + "x" + std::to_string(st.geo.logical_h);
-    rt::run(st.we, wine, {"reg", "add", "HKCU\\Software\\Wine\\Explorer\\Desktops", "/v",
-                          "kretro", "/d", g, "/f"});
-    log_line("native: the game is asked to render at " + g);
+    rt::run(rt::offscreen(st.we), wine, {"reg", "add", "HKCU\\Software\\Wine\\Explorer\\Desktops", "/v", "kretro", "/d", g, "/f"});
+    st.say("native: the game is asked to render at " + g);
   }
 }
 
@@ -319,6 +336,11 @@ void compositor_options(PlayState& st) {
   co.capture = st.req.record;
   co.pause_on_blur = st.m->present.pause_on_blur;
   co.stop_after = st.req.stop_after;
+  // Xwayland answering is the game's screen being up: Weston's window is
+  // mapped by then, and the game is started a moment later.
+  if (st.req.hooks.screen_up) {
+    co.on_display_ready = [&st](const std::string&) { st.req.hooks.screen_up(); };
+  }
 }
 
 void command_line(PlayState& st) {
@@ -342,12 +364,20 @@ void command_line(PlayState& st) {
 
 void launch(PlayState& st, const Layers& layers) {
   st.started = std::time(nullptr);
+  // The prefix was got ready with no display, and the wineserver that did it
+  // lingers for a few seconds. Stopping it means the game starts a server of
+  // its own, with every process in it, explorer's desktop included, on the
+  // game's display. The game's lock is held, so nothing else of this prefix
+  // is running. -k rather than -w: waiting for the server to leave by itself
+  // adds about three seconds to every launch.
+  if (fs::path ws = rt::which(st.e, "wineserver"); !ws.empty()) rt::run(st.we, ws, {"-k"});
   CompositorResult cres;
   if (st.backend && st.backend->display == backend::DisplayPath::GamescopeDirect) {
     // gamescope is already the compositor, already fullscreen and already
     // scaling; Wine goes straight onto its display. No frames are harvested
     // on this road, because there is no compositor of ours to read them from.
-    log_line("display: gamescope, without a nested compositor");
+    st.say("display: gamescope, without a nested compositor");
+    if (st.req.hooks.screen_up) st.req.hooks.screen_up();
     ProcOptions po;
     po.cwd = layers.merged.string();
     po.capture = false;
@@ -360,7 +390,7 @@ void launch(PlayState& st, const Layers& layers) {
     fs::path ws = rt::which(st.e, "wineserver");
     if (!ws.empty()) rt::run(st.we, ws, {"-k"});
   } else {
-    cres = run_in_compositor(st.e, st.we, st.wine, st.gargs, layers.merged, st.co, log_line);
+    cres = run_in_compositor(st.e, st.we, st.wine, st.gargs, layers.merged, st.co, st.sayer());
   }
   st.outcome.status = cres.status;
 }
@@ -459,6 +489,8 @@ void record(PlayState& st, const Layers& layers) {
 //     explicit choice wins over the backend's.
 //  8. A dry run returns after every prefix write and before anything is
 //     launched.
+//  9. A caller's stop is heard before the prefix is touched, after it is
+//     ready, and before the game starts; never inside a step.
 //
 // The lock, the pack, the layers and the guard are declared here, in that
 // order, so the mounts are closed before the lock is let go.
@@ -484,9 +516,11 @@ Outcome play(const rt::Env& e, const PlayRequest& req) {
 
   resolve_exe(st, layers);
   choose_backend(st, layers);
+  stop_if_asked(st);
   make_prefix_dirs(st);
   link_install_dir(st, layers);
   build_wine_env_and_prefix(st, layers);
+  stop_if_asked(st);
   attach_discs(st, layers);
   map_game_drive(st, layers);
   run_after_prefix(st, layers);
@@ -497,9 +531,10 @@ Outcome play(const rt::Env& e, const PlayRequest& req) {
   compositor_options(st);
   command_line(st);
   if (req.dry_run) {
-    log_line("dry run: everything is ready, and the game is not started");
+    st.say("dry run: everything is ready, and the game is not started");
     return outcome;
   }
+  stop_if_asked(st);
 
   launch(st, layers);
   keep_frame(st);

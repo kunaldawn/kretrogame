@@ -3,6 +3,8 @@
 // src/session/.
 #pragma once
 
+#include <signal.h>
+
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -32,12 +34,13 @@ void release_on_signal(int sig);
 
 // A session's hold on its mounts for signals (interrupt.cpp). Made before the
 // first mount: it points g_active at `l` and hands SIGINT, SIGTERM and SIGHUP
-// to release_on_signal. Its end closes the layers and clears g_active.
+// to release_on_signal. Its end closes the layers, clears g_active and puts
+// back the handlers it found.
 //
-// The handlers are never put back. A signal that comes after the session is
-// still answered by release_on_signal, which exits 128 + the signal with
-// nothing left to release - and that exit status is what a caller interrupted
-// while mounting, or after, sees.
+// Put back because a session is not always the whole of the process: the
+// shelf and a player's launcher play a game and then carry on, and SDL's own
+// handlers, which turn a SIGTERM into a quit the window can answer, were
+// replaced for good by one that exits on the spot with nothing to release.
 class MountInterruptGuard {
  public:
   explicit MountInterruptGuard(Layers& l);
@@ -47,6 +50,8 @@ class MountInterruptGuard {
 
  private:
   Layers* l_;
+  // What SIGINT, SIGTERM and SIGHUP were handled by before, in that order.
+  struct sigaction before_[3] {};
 };
 
 // Puts a backend decision into the prefix and the environment (backend.cpp).

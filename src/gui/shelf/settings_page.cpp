@@ -2,6 +2,7 @@
 #include <SDL.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -10,6 +11,7 @@
 #include "../../config/config.h"
 #include "../../config/scaling.h"
 #include "../../pack/kgpack.h"
+#include "../palette.h"
 #include "../widgets.h"
 #include "imgui.h"
 #include "pages.h"
@@ -20,86 +22,123 @@ namespace fs = std::filesystem;
 // No save button. Every change is written as it is made: a settings screen
 // with a save button is a settings screen you can lose work in.
 void SettingsPage::draw() {
-  PageWindow page("Settings", "Esc back", ctx_.fonts.big);
-  config::Config cfg = config::load(config::config_file());
+  set_page_trail("kretro \xe2\x80\xba settings");
+  PageWindow page("Settings", "Esc back", ctx_.fonts.big());
+  // The config and the game's own size, read when the page comes up rather
+  // than on every frame; what is changed here is written straight back, so
+  // the copy is never behind it.
+  const Entry* game = nullptr;
+  if (!ctx_.entries.empty()) game = &ctx_.entries[ctx_.selected < ctx_.entries.size() ? ctx_.selected : 0];
+  if (disk_.due(game ? game->pack.string() : std::string())) {
+    cfg_ = config::load(config::config_file());
+    // Measured as a play would measure it, and only when the page is read:
+    // under a Wayland host that is another process.
+    panel_ = desktop_size(false);
+    game_w_ = 640;
+    game_h_ = 480;
+    std::error_code e2;
+    if (game && fs::exists(game->pack, e2)) {
+      try {
+        Meta mm = Pack::open(game->pack).meta();
+        if (mm.run.width) {
+          game_w_ = mm.run.width;
+          game_h_ = mm.run.height;
+        }
+      } catch (const std::exception&) {}
+    }
+  }
+  config::Config& cfg = cfg_;
   bool dirty = false;
 
-  ImGui::Text("window");
+  // One region scrolls the page; the settings are rows in a column of a
+  // readable width down the middle of it, a name and its help at the left of
+  // each and the control at the right.
+  begin_scroll("settings", ImVec2(0, 0));
+  centre_column(content_max_w(Content::Form));
+  step_heading("Settings");
+
+  nav_section_begin("window");
+  section("window");
   const char* wmodes[] = {"windowed", "borderless", "fullscreen"};
   int wm = static_cast<int>(cfg.window.mode);
-  if (ImGui::Combo("mode", &wm, wmodes, 3)) {
+  setting_begin("mode");
+  if (step_combo("##mode", &wm, wmodes, 3)) {
     cfg.window.mode = static_cast<config::WindowMode>(wm);
     dirty = true;
   }
+  default_focus();
+  setting_end();
+  setting_begin("position");
   if (ImGui::Checkbox("remember where the window was", &cfg.window.remember_geometry)) dirty = true;
+  setting_end();
+  nav_section_end();
 
-  ImGui::Spacing();
-  ImGui::Text("scaling");
+  nav_section_begin("scaling");
+  section("scaling");
   const char* smodes[] = {"integer", "fit", "native"};
   int sm = static_cast<int>(cfg.display.mode);
-  if (ImGui::Combo("how", &sm, smodes, 3)) {
+  setting_begin("how",
+                "integer keeps every game pixel an exact square. fit is the largest whole "
+                "number that fits, fullscreen. native asks the game for the screen's own size.");
+  if (step_combo("##how", &sm, smodes, 3)) {
     cfg.display.mode = static_cast<config::ScaleMode>(sm);
     dirty = true;
   }
+  setting_end();
   int sc = static_cast<int>(cfg.display.scale);
-  if (ImGui::SliderInt("factor", &sc, 0, 6, sc == 0 ? "automatic" : "%dx")) {
+  setting_begin("factor");
+  if (ImGui::SliderInt("##factor", &sc, 0, 6, sc == 0 ? "automatic" : "%dx")) {
     cfg.display.scale = static_cast<uint32_t>(sc);
     dirty = true;
   }
-  ImGui::TextDisabled(
-      "integer keeps every game pixel an exact square. fit is the largest whole");
-  ImGui::TextDisabled(
-      "number that fits, fullscreen. native asks the game for the screen's own size.");
+  static const char* const steps[] = {"auto", "1x", "2x", "3x", "4x", "5x", "6x"};
+  step_labels(steps, 6, sc);
+  setting_end();
 
   // What that means, for the game you were last looking at.
   if (!ctx_.entries.empty()) {
     const Entry& en = ctx_.entries[ctx_.selected < ctx_.entries.size() ? ctx_.selected : 0];
-    uint32_t pw = 0, ph = 0;
-    SDL_DisplayMode dm;
-    if (SDL_GetDesktopDisplayMode(0, &dm) == 0) { pw = dm.w; ph = dm.h; }
-    uint32_t gw = 640, gh = 480;
-    std::error_code e2;
-    if (fs::exists(en.pack, e2)) {
-      try {
-        Meta mm = Pack::open(en.pack).meta();
-        if (mm.run.width) { gw = mm.run.width; gh = mm.run.height; }
-      } catch (const std::exception&) {}
-    }
-    config::Geometry g =
-        config::compute_geometry(gw, gh, pw, ph, config::for_game(cfg, en.id));
-    ImGui::Spacing();
-    ImGui::Text("%s would run at %ux%u at %ux -> %ux%u%s", en.name.c_str(), gw, gh, g.scale,
-                g.logical_w * g.scale, g.logical_h * g.scale,
-                g.fullscreen ? ", fullscreen" : "");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("use these for this game only")) {
+    const uint32_t gw = game_w_, gh = game_h_;
+    config::Geometry g = config::compute_geometry(
+        gw, gh, {panel_.w, panel_.h, panel_.usable_w, panel_.usable_h}, config::for_game(cfg, en.id));
+    char would[160];
+    std::snprintf(would, sizeof would, "would run at %ux%u at %ux -> %ux%u%s", gw, gh, g.scale,
+                  g.logical_w * g.scale, g.logical_h * g.scale, g.fullscreen ? ", fullscreen" : "");
+    setting_begin(en.name.c_str(), would);
+    if (ghost_button("use these for this game only")) {
       cfg.per_game[en.id] = cfg.display;
       dirty = true;
     }
     if (cfg.per_game.count(en.id)) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("clear its override")) {
+      same_line_if_fits("clear its override");
+      if (ghost_button("clear its override")) {
         cfg.per_game.erase(en.id);
         dirty = true;
       }
     }
+    setting_end();
   }
+  nav_section_end();
 
-  ImGui::Spacing();
-  ImGui::Text("library folders");
+  nav_section_begin("folders");
+  section("library folders");
   int remove_at = -1;
   for (size_t i = 0; i < cfg.library_paths.size(); ++i) {
-    ImGui::TextDisabled("  %s", cfg.library_paths[i].c_str());
-    ImGui::SameLine();
     ImGui::PushID(static_cast<int>(i));
-    if (ImGui::SmallButton("remove")) remove_at = static_cast<int>(i);
+    setting_begin(cfg.library_paths[i].c_str(), nullptr, kCyan);
+    if (ghost_button("remove")) remove_at = static_cast<int>(i);
+    setting_end();
     ImGui::PopID();
   }
   if (remove_at >= 0) {
     cfg.library_paths.erase(cfg.library_paths.begin() + remove_at);
     dirty = true;
   }
-  ImGui::TextDisabled("  drop a folder on this window to add one");
+  vgap(4);
+  ImGui::TextDisabled("drop a folder on this window to add one");
+  nav_section_end();
+  end_centre_column();
+  end_scroll();
 
   if (dirty) config::save(config::config_file(), cfg);
 }

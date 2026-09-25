@@ -254,7 +254,12 @@ session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) co
     fs::remove_all(state_dir() / id / "extra", ec);
   }
 
-  PrefixResult pr = ensure_prefix(wine_env, game_prefix_dir(id), state_dir() / id / "prefix-before", log_line);
+  // Every line goes to stderr, and to the launcher's window when it asked.
+  const std::function<void(const std::string&)> say = [&ov](const std::string& line) {
+    log_line(line);
+    if (ov.say) ov.say(line);
+  };
+  PrefixResult pr = ensure_prefix(wine_env, game_prefix_dir(id), state_dir() / id / "prefix-before", say);
   pre.emplace_back("prefix action", prefix_action_name(pr.action));
   if (!pr.snapshot.empty()) pre.emplace_back("prefix snapshot", pr.snapshot.string());
 
@@ -267,6 +272,8 @@ session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) co
   req.display.fullscreen = ov.fullscreen_set ? ov.fullscreen : gs.fullscreen;
   req.display.panel_w = ov.panel_w;
   req.display.panel_h = ov.panel_h;
+  req.display.usable_w = ov.usable_w;
+  req.display.usable_h = ov.usable_h;
   req.dry_run = ov.dry_run;
   const gpu::HostCaps caps = m.caps;
   const bool needs_gpu = g.needs_gpu;
@@ -284,11 +291,14 @@ session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) co
   if (req.game_drive > 'y') req.game_drive = 'y';
 
   const bundle::GameMeta* gm = &g;
-  req.hooks.after_prefix = [gm, extra_overrides](rt::Env& we, const fs::path& prefix, const fs::path&) {
+  req.hooks.after_prefix = [gm, extra_overrides, say](rt::Env& we, const fs::path& prefix, const fs::path&) {
     drop_host_device_links(prefix);
     if (!extra_overrides.empty()) we.append("WINEDLLOVERRIDES", extra_overrides, ';');
-    if (gm->key) apply_embedded_key(we, prefix, *gm->key, log_line);
+    if (gm->key) apply_embedded_key(we, prefix, *gm->key, say);
   };
+  // session::play writes its own lines to stderr, so these are only the rest.
+  req.hooks.say = ov.say;
+  req.hooks.screen_up = ov.screen_up;
 
   session::Outcome out = session::play(wine_env, req);
   out.plan.insert(out.plan.begin(), pre.begin(), pre.end());

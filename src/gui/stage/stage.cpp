@@ -2,6 +2,11 @@
 
 #include "x_errors.h"
 
+// Before Xlib, whose macros (None, Status, Bool) would otherwise land in the
+// ImGui and widget headers.
+#include "../palette.h"
+#include "../widgets.h"
+
 #include <SDL.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -9,7 +14,10 @@
 #include <X11/keysym.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cfloat>
+#include <cmath>
 #include <csetjmp>
 #include <cstdio>
 #include <cstring>
@@ -93,7 +101,8 @@ Stage::Stage(SDL_Renderer* r, const std::string& display) : p_(new Impl) {
   p_->dpy = XOpenDisplay(display.c_str());
   if (!p_->dpy) {
     p_->dead = true;
-    p_->set_trouble("could not open " + display);
+    // Said as a display: a bare ":57" reads like a line number.
+    p_->set_trouble("could not open X display " + display);
     return;
   }
   // A live connection, whatever address it was handed. The previous install's
@@ -107,7 +116,7 @@ Stage::Stage(SDL_Renderer* r, const std::string& display) : p_(new Impl) {
   XWindowAttributes at{};
   if (!XGetWindowAttributes(p_->dpy, p_->root, &at) || at.width <= 0 || at.height <= 0) {
     p_->dead = true;
-    p_->set_trouble("the root window of " + display + " has no size");
+    p_->set_trouble("the root window of X display " + display + " has no size");
     return;
   }
   p_->w = at.width;
@@ -249,21 +258,123 @@ bool Stage::refresh() {
   return !p->dead.load() && !dead_displays().dead(p->dpy);
 }
 
+namespace {
+
+// A frame of thickness t drawn just outside the rectangle a..b, as four filled
+// bars rather than AddRect: the software renderer steps a thick outlined
+// rectangle, and outside rather than on the edge so the ring never covers a
+// pixel of the installer's own picture.
+void outer_frame(ImDrawList* dl, ImVec2 a, ImVec2 b, float t, ImU32 c) {
+  dl->AddRectFilled(ImVec2(a.x - t, a.y - t), ImVec2(b.x + t, a.y), c);
+  dl->AddRectFilled(ImVec2(a.x - t, b.y), ImVec2(b.x + t, b.y + t), c);
+  dl->AddRectFilled(ImVec2(a.x - t, a.y), ImVec2(a.x, b.y), c);
+  dl->AddRectFilled(ImVec2(b.x, a.y), ImVec2(b.x + t, b.y), c);
+}
+
+// The stage's trouble, as a strip across the top of the panel: a boot-log chip
+// and the sentence wrapped under the panel's width. A display that has died is
+// a failure; anything short of that (no XTEST, so watch but not click) is a
+// warning. Drawn on the list, not as items, because the panel is one item.
+//
+// It has a band of the panel to itself, above the picture rather than over it:
+// laid across the picture it hid the top of the installer's own window and ran
+// through the focus ring. trouble_strip_height is that band's height.
+struct StripText {
+  ImFont* f;
+  float fs, chip_w, wrap;
+  ImVec2 pad, size;
+};
+
+StripText strip_text(float width, const std::string& text) {
+  StripText t;
+  t.f = ImGui::GetFont();
+  t.fs = ImGui::GetFontSize();
+  t.pad = px(12, 8);
+  t.chip_w = t.f->CalcTextSizeA(t.fs, FLT_MAX, 0.0f, "[WARN]").x + px(10);
+  t.wrap = std::max(px(40), width - 2.0f * t.pad.x - t.chip_w);
+  t.size = t.f->CalcTextSizeA(t.fs, FLT_MAX, t.wrap, text.c_str());
+  return t;
+}
+
+float trouble_strip_height(float width, const std::string& text) {
+  const StripText t = strip_text(width, text);
+  return std::round(t.size.y + 2.0f * t.pad.y);
+}
+
+void trouble_strip(ImDrawList* dl, ImVec2 box0, ImVec2 box1, float hair, const std::string& text,
+                   bool dead) {
+  const StripText t = strip_text(box1.x - box0.x, text);
+  ImFont* f = t.f;
+  const float fs = t.fs;
+  const char* word = dead ? "FAIL" : "WARN";
+  const ImVec4 colour = badge_colour(dead ? BadgeKind::Fail : BadgeKind::Warn);
+  const float bracket_w = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, "[").x;
+
+  const float bottom = std::min(box1.y, box0.y + std::round(t.size.y + 2.0f * t.pad.y));
+  dl->PushClipRect(box0, box1, true);
+  dl->AddRectFilled(box0, ImVec2(box1.x, bottom), u32(kBg0));
+  dl->AddRectFilled(ImVec2(box0.x, bottom - hair), ImVec2(box1.x, bottom), u32(colour, 0.35f));
+
+  const ImVec2 at(box0.x + t.pad.x, box0.y + t.pad.y);
+  const float word_w = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, word).x;
+  const float cells = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, "WARN").x;
+  dl->AddText(f, fs, at, u32(kDim), "[");
+  dl->AddText(f, fs, ImVec2(at.x + bracket_w + (cells - word_w) * 0.5f, at.y), u32(colour), word);
+  dl->AddText(f, fs, ImVec2(at.x + bracket_w + cells, at.y), u32(kDim), "]");
+  // The sentence in the colour the wizard gives its own: a failure's kWarn,
+  // a warning's kWarm.
+  dl->AddText(f, fs, ImVec2(at.x + t.chip_w, at.y), u32(dead ? kWarn : kWarm), text.c_str(), nullptr,
+              t.wrap);
+  dl->PopClipRect();
+}
+
+// Words centred in the rectangle a..b on the window's font: a turning spinner
+// in the accent and `text` dim beside it, the way the rest of the program
+// says it is waiting.
+void waiting_line(ImDrawList* dl, ImVec2 a, ImVec2 b, const char* text) {
+  ImFont* f = ImGui::GetFont();
+  const float fs = ImGui::GetFontSize();
+  const char* glyph = spinner_glyph();
+  const float gw = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, glyph).x;
+  const float sp = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, " ").x;
+  const std::string shown = elide(f, text, std::max(1.0f, b.x - a.x - gw - sp - px(16)));
+  const float tw = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, shown.c_str()).x;
+  const float x = std::round((a.x + b.x - gw - sp - tw) * 0.5f);
+  const float y = std::round((a.y + b.y - fs) * 0.5f);
+  dl->AddText(f, fs, ImVec2(x, y), u32(kAccent), glyph);
+  dl->AddText(f, fs, ImVec2(x + gw + sp, y), u32(kDim), shown.c_str());
+}
+
+}  // namespace
+
 void Stage::draw(ImVec2 max) {
   Impl* p = p_.get();
   // The tile idiom from the shelf, for the same reasons: an InvisibleButton is
   // the hit target and the thing gamepad navigation can land on, the picture
   // goes on the window draw list underneath it, and the focus ring is the same
   // amber the tiles use so that "this is what your input is going to" means one
-  // thing everywhere in the program.
+  // thing everywhere in the program. ImGui leaves an invisible button out of
+  // navigation unless it is asked in, and then only hovering gave the stage
+  // the input: a keyboard alone could never type into an installer.
+  //
+  // Keys go to the installer while the stage has the focus, as they did while
+  // the mouse was over it. A modal over the stage takes the focus, and the
+  // hover, with it, so nothing typed into a question reaches the installer.
+  // Tab stays the stage's while it has the focus, so walking a dialog with it
+  // does not also walk ImGui's focus off the stage.
   const ImVec2 p0 = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("stage", ImVec2(max.x > 1 ? max.x : 1, max.y > 1 ? max.y : 1));
+  const ImVec2 box(max.x > 1 ? max.x : 1, max.y > 1 ? max.y : 1);
+  // ImGui's own focus rectangle is left out, as the tile's is: the ring
+  // below is the stage's focus.
+  ImGui::PushStyleColor(ImGuiCol_NavCursor, alpha(kAmber, 0.0f));
+  ImGui::InvisibleButton("stage", box, ImGuiButtonFlags_EnableNav);
+  ImGui::PopStyleColor();
+  // The page's glow is not drawn round the panel: the stage draws its own
+  // round the installer's picture, which is what the input goes to.
+  own_focus_ring();
+  own_tab_while_focused();
+  const bool keys = nav_focused();
   p->focus = ImGui::IsItemFocused() || ImGui::IsItemHovered();
-
-  const Fit f = fit_inside(p->w, p->h, max.x, max.y);
-  const ImVec2 a(p0.x + f.x, p0.y + f.y);
-  const ImVec2 b(a.x + f.w, a.y + f.h);
-  ImDrawList* dl = ImGui::GetWindowDrawList();
 
   SDL_Texture* tex = nullptr;
   std::string trouble;
@@ -272,28 +383,74 @@ void Stage::draw(ImVec2 max) {
     tex = p->tex;
     trouble = p->trouble;
   }
+
+  // The picture is fitted inside the panel less the trouble strip's band and
+  // the focus ring's width all round, so neither the strip nor the ring ever
+  // covers a pixel of the installer's picture or crosses the panel's edge.
+  // Input is unmapped against the same area, so a click lands where it looks.
+  const float hair = std::max(1.0f, std::round(px(1)));
+  const float ring = std::max(1.0f, std::round(px(2)));
+  const float strip = trouble.empty() ? 0.0f : trouble_strip_height(box.x, trouble);
+  const ImVec2 area0(p0.x + ring, p0.y + strip + ring);
+  const ImVec2 area(std::max(0.0f, box.x - ring * 2), std::max(0.0f, box.y - strip - ring * 2));
+  const Fit f = fit_inside(p->w, p->h, area.x, area.y);
+  const ImVec2 a(area0.x + f.x, area0.y + f.y);
+  const ImVec2 b(a.x + f.w, a.y + f.h);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  // The letterbox is a panel one step up from the page with a hairline round
+  // it, so the installer reads as a screen set into the page rather than as a
+  // picture floating on it, and the bars either side of a 4:3 installer have
+  // an edge.
+  const ImVec2 box1(p0.x + box.x, p0.y + box.y);
+  dl->AddRectFilled(p0, box1, u32(kBg1));
+  outer_frame(dl, p0, box1, hair, u32(kLine));
+
   if (tex && f.w > 0) {
-    dl->AddImage(reinterpret_cast<ImTextureID>(tex), a, b);
+    // In pieces, as every large picture is: the software renderer breaks one
+    // drawn whole.
+    Texture t;
+    t.tex = tex;
+    t.w = p->w;
+    t.h = p->h;
+    draw_image(dl, t, a, b);
   } else {
-    // Before the first frame arrives, a black rectangle the size the installer
-    // will be, so the panel does not jump when the picture appears.
-    const Fit g = fit_inside(p->w > 0 ? p->w : 4, p->h > 0 ? p->h : 3, max.x, max.y);
-    dl->AddRectFilled(ImVec2(p0.x + g.x, p0.y + g.y),
-                      ImVec2(p0.x + g.x + g.w, p0.y + g.y + g.h), IM_COL32(0, 0, 0, 255));
+    // Before the first frame arrives, a dark rectangle the size the installer
+    // will be, so the panel does not jump when the picture appears. While
+    // nothing has gone wrong it says it is waiting, in the words and the
+    // spinner the page uses before the stage exists, so a slow installer does
+    // not look like a hung one; once something has, it says there is no
+    // picture, rather than leaving a black box that looks like one.
+    const Fit g = fit_inside(p->w > 0 ? p->w : 4, p->h > 0 ? p->h : 3, area.x, area.y);
+    const ImVec2 g0(area0.x + g.x, area0.y + g.y);
+    const ImVec2 g1(g0.x + g.w, g0.y + g.h);
+    dl->AddRectFilled(g0, g1, u32(kBg0));
+    if (g.w > 0) outer_frame(dl, g0, g1, hair, u32(kLine));
+    if (g.w > 0) {
+      if (trouble.empty()) {
+        waiting_line(dl, g0, g1, "waiting for the installer's first frame...");
+      } else {
+        const char* none = "no picture from the installer";
+        const ImVec2 ts = ImGui::CalcTextSize(none);
+        dl->AddText(ImVec2(std::round((g0.x + g1.x - ts.x) * 0.5f), std::round((g0.y + g1.y - ts.y) * 0.5f)),
+                    u32(kDim), none);
+      }
+    }
   }
 
-  if (p->focus.load() && f.w > 0) {
-    dl->AddRect(a, b, IM_COL32(255, 214, 102, 255), 0.0f, 0, 3.0f);
-  }
-  if (!trouble.empty()) {
-    dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(255, 180, 180, 255), trouble.c_str());
-  }
+  if (!trouble.empty()) trouble_strip(dl, p0, box1, hair, trouble, p->dead.load());
+  // Last, so nothing is drawn over it.
+  // The keys' ring is the glow every focused item has, so the stage reads
+  // as one more thing the focus can be on; under the mouse alone, the
+  // quieter frame a hovered item has, as when a click put the focus there.
+  if (keys && f.w > 0) focus_glow(dl, ImVec2(a.x - ring, a.y - ring), ImVec2(b.x + ring, b.y + ring), 1.0f);
+  else if (p->focus.load() && f.w > 0) outer_frame(dl, a, b, ring, u32(kAccentDim));
   // Focused, or still owed an up. A button dragged off the panel takes the
   // hover with it, and the frame the person lets go on is a frame the panel
   // does not have: forwarding only while focused is how a press got through
   // and its release did not.
   const bool live = p->focus.load();
-  if (live || p->buttons.any() || p->keys.any()) forward_input(p0, f, live);
+  if (live || p->buttons.any() || p->keys.any()) forward_input(area0, f, live);
 }
 
 void Stage::forward_input(ImVec2 origin, const Fit& f, bool live) {

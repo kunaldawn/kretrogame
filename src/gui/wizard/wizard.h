@@ -29,6 +29,7 @@
 #include "../../install/setup_ref.h"
 #include "../../pack/kgpack.h"
 #include "../../rt/env.h"
+#include "../focus.h"
 #include "../job.h"
 #include "../stage/stage.h"
 #include "../window.h"
@@ -91,7 +92,40 @@ class Wizard {
   void build_page();
   void done_page();
 
-  void browser();
+  // The file browser, `height` real pixels tall.
+  void browser(float height);
+  // The page furniture every step shares, in the three parts Tab and the
+  // shoulder buttons move between. The stepper is the steps in a row, this
+  // one lit, so a person nine screens in can see how far there is to go; a
+  // step Escape would walk back to is a button there too. The body is a child
+  // that scrolls, headed by the step's title in a column no wider than a form
+  // reads well at, and the footer under it holds the way back and the step's
+  // one primary button, so "Next" stays on screen however long the page above
+  // it grows - an open file browser pushed it off the bottom of a small
+  // window. `below` is room the page keeps between the body and the footer
+  // for something of its own that must not scroll away, such as that
+  // browser.
+  void step_top();
+  float footer_block() const;
+  void begin_body(float below = 0);
+  void end_body();
+  // The footer: Back (Cancel on the first step, where Escape leaves the
+  // wizard; none on the last, where it does not go back a step) doing what
+  // Escape does, and `label` as the primary, pressed or not. `extra` draws
+  // anything else the step keeps in its footer, given the footer's top.
+  bool step_footer(const char* label, bool enabled = true, bool is_default = false,
+                   const std::function<void(float)>& extra = nullptr);
+  // The page window's name, which is also the heading begin_body draws.
+  const char* step_title(const std::string& title);
+  // The step Escape goes back to from `s`, when it goes back a step at all.
+  static bool step_before(Step s, Step* before);
+  // Whether Escape, pressed as many times as it takes, walks back from this
+  // step to `to`: the jumps the stepper allows.
+  bool can_go_back_to(Step to) const;
+  // The width a paragraph wraps at: about ninety characters, or the room there
+  // is when that is less, as a local x for PushTextWrapPos. A sentence as wide
+  // as a large window is hard to read back to its next line.
+  static float prose_wrap();
   // What went wrong, drawn on the page it went wrong on. A wizard step is a
   // whole screen and the log modal is gone by the time anybody could read it,
   // so a failure with nowhere to be said is a failure the user never sees.
@@ -133,9 +167,12 @@ class Wizard {
 
   const rt::Env& env_;
   SDL_Renderer* ren_;
-  ImFont* big_ = nullptr;
+  Fonts fonts_;
 
   Step step_ = Step::Sources;
+  std::string heading_;
+  // How far the body's column is moved in for its scrollbar (begin_body).
+  float body_indent_ = 0;
   install::Draft draft_;
   // Step 2's offer. Computed once, when step 2 is first drawn: it reads
   // a handful of small toml files and compares strings, which is nothing beside
@@ -173,6 +210,9 @@ class Wizard {
   char id_buf_[64] = {};
   char name_buf_[128] = {};
   char serial_buf_[64] = {};
+  // When the keys file is next looked in for a serial for an empty field:
+  // when the step comes up and as the id changes, not on every frame.
+  Refresh keys_seen_;
   char args_buf_[128] = {};
   char subdir_buf_[128] = {};
   char member_buf_[128] = {};
@@ -193,6 +233,12 @@ class Wizard {
   std::string stage_trouble_;
   bool stage_dead_ = false;
   size_t files_ = 0;
+  // How tall the strip under the stage came out last frame, in design pixels.
+  // The stage is sized before the strip is drawn, and the strip's height
+  // depends on the font, the scale and how many drives there are, so it is
+  // measured rather than guessed. Kept unscaled so that a zoom or a move to
+  // another screen does not size the stage from a height at the old scale.
+  float strip_h_ = 0;
   // Which disc each drive letter is currently pointed at, as the combo shows
   // it. Build::drives() records what was mounted and is what goes into the
   // pack, so a swap must not edit it; this is the UI's own memory of a change

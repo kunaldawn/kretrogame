@@ -45,7 +45,9 @@ void attach_cdrom(const rt::Env& e, const fs::path& prefix, char letter, const f
   char l = static_cast<char>(std::tolower(static_cast<unsigned char>(letter)));
   fs::path wine = rt::which(e, "wine");
   if (wine.empty()) throw std::runtime_error("disc: the runtime has no wine");
-  rt::Env we = e;
+  // No display, as for every Wine command run before the compositor; see
+  // rt::offscreen.
+  rt::Env we = rt::offscreen(e);
   we.set("WINEPREFIX", prefix.string());
   auto r = rt::run(we, wine, {"reg", "add", "HKLM\\Software\\Wine\\Drives", "/v",
                               std::string(1, l) + ":", "/t", "REG_SZ", "/d", "cdrom", "/f"});

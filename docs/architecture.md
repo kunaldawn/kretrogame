@@ -111,6 +111,8 @@ on the app's behalf.
 | `KRETRO_ISO_DIR` | user, tests | `install::iso_dir` | Where disc images are. Otherwise `<state>/iso` when it exists, else `iso/` in the working directory. |
 | `KRETRO_MANIFESTS` | user, tests | `install` manifest search | An extra manifest directory, searched first. |
 | `KRETRO_DISC_DB` | user | `disc` database | An extra known-disc list, searched first. |
+| `KRETRO_UI_SCALE` | user, screenshot tools | `gui::forced_ui_scale` (kretro and the player) | An absolute UI scale, 0.5 to 4, in place of the one worked out from the window's size and the screen's density. Ctrl +, Ctrl - and Ctrl 0 still zoom on top of it. |
+| `KRETRO_REDUCE_MOTION` | user, screenshot tools | `gui::reduce_motion` (kretro and the player) | `1` turns motion off: the page fade-in, focus glides, scrolling, the carousels' easing, dialog fades, the hero band's fade-in and its cross-fade between games snap to where they are going, and the blinking cursors are solid. |
 
 `bundle::preview_env` removes every `KRETRO_*` variable before it starts a
 built player, so that a preview sees what a stranger would.
@@ -148,7 +150,7 @@ util <- {config, gpu, pack} <- rt <- disc <- {backend, wine} <- session <- insta
 | `install/` | the install engine (`install::Build`, split over `build_*.cpp`), manifests, the collection, drafts, sharing, keys, staging, the body layout |
 | `bundle/` | the table of contents, `bundle.meta`, gamepad maps, building and verifying a player; `bundle/builder/` holds the Bundles page's decisions without the page |
 | `player/` | the player's own logic without a window: its file, state directory, settings, verified memo, unpacking, prefix, desktop entry, command line, doctor, and `player::Player` |
-| `gui/` | both windows. Shared pieces are at the top (`page.h`, `event_loop`, `job`, `job_modal`, `widgets`, `window`, `texture`, `screen`, `file_list`, `gamepad_bridge`). `shelf/`, `wizard/`, `bundles/` and `stage/` are kretro's. `launcher/` is the player's. |
+| `gui/` | both windows. Shared pieces are at the top (`page.h`, `event_loop`, `focus`, `anim`, `scroll`, `layout`, `blocks`, `dialog`, `draw`, `status_bar.cpp`, `session_log`, `job`, `job_modal`, `widgets`, `window`, `scale`, `palette`, `texture`, `screen`, `file_list`, `gamepad_bridge`). `shelf/`, `wizard/`, `bundles/` and `stage/` are kretro's. `launcher/` is the player's. |
 | `cli/` | kretro's command table and handlers |
 | `apps/` | the three `main`s, and the player's command handlers |
 
@@ -255,13 +257,76 @@ The ordering constraints:
 The lock, the pack, the layers and the guard are locals declared in that
 order, so the mounts are closed before the lock is released.
 
+### The panel and its units
+
+`geometry` picks the scale from the panel the caller measured
+(`DisplayOptions::panel_w/h` and `usable_w/h`, from `gui::desktop_size` in
+`src/gui/screen.cpp`). The session layer links no SDL, so it cannot measure
+the panel itself.
+
+The panel has to be in the units the nested Weston sizes its window in. Under
+a Wayland host Weston runs `--backend=wayland` and makes a window of
+width x scale by height x scale in the host's *logical* units: it sets no
+buffer scale and binds neither fractional scaling nor the viewporter. Under
+an X11 host it runs `--backend=x11` and those units are X pixels. A Wayland
+desktop at a fractional scale with native Xwayland scaling gives an X root
+larger than the logical desktop (6144x3456 against 3072x1728 at 125% on a 4K
+monitor), so asking SDL's x11 driver there would double the scale.
+
+`desktop_size` therefore:
+
+- with SDL's video down (`kretro play`, `kretro display`, the player's
+  `play`): brings it up with the wayland driver for the logical size, then
+  with the x11 driver for the work area (`_NET_WORKAREA`, which Wayland has no
+  protocol for), which it scales by the ratio of the two desktops; on an X11
+  host only the x11 driver is asked;
+- with video up under a Wayland host (the shelf and the launcher, whose
+  windows are X11 ones, and SDL runs one video driver at a time): runs
+  `$KRETRO_APP panel`, a hidden command of both apps that measures as above
+  and prints `W H UW UH`. It is run at each play rather than remembered,
+  because the shelf outlives a change of monitor, scale or dock. If it
+  fails, the driver that is up is asked, as before.
+
+`config::compute_geometry` gives the fullscreen modes (Fit, Native) the whole
+panel and a windowed Integer scale only the work area, so the window is not
+squeezed by the window manager. A work area of zero means the whole panel.
+Only the first display is measured.
+
+### Getting the prefix ready without a display
+
+Every Wine command that runs before the nested compositor exists runs with no
+display: `wineboot --init`, the Graphics pin, `winecfg /v` and the Explorer
+keys in `prepare_prefix`, the fragment import (`wine::apply_fragment`), the
+CD-ROM drive (`disc::attach_cdrom`, at play and at install), the backend's
+`regedit`, the renderer and Native geometry `reg add`s, and in the player the
+`wineboot -u` of a prefix upgrade and the author's key. Each takes its
+environment from `rt::offscreen`, a copy with `DISPLAY` and `WAYLAND_DISPLAY`
+set to the empty string.
+
+With the host's display these commands drew on the real desktop: wineboot's
+"The Wine configuration is being updated" dialog on a first play, and, once
+the prefix names the `kretro` virtual desktop, a full-screen "Wine Desktop"
+for a second or so on every launch. The variables are set empty rather than
+removed on purpose. With `DISPLAY` missing Wine goes on to its Wayland driver,
+and libwayland connects to `wayland-0` when `WAYLAND_DISPLAY` is missing, so
+either one unset still reaches the host. An empty name makes both connections
+fail and leaves Wine on its null driver, which is all these commands need; the
+runtime's prefix template is built the same way. The environment the game and
+Weston get (`PlayState::we`) keeps the host's display, so only copies are
+blanked.
+
+`launch` stops the prefix's wineserver (`wineserver -k`, about 0.1 s) before
+the game starts, so the game gets a server of its own whose processes,
+explorer's desktop included, all start on the nested display. `-w` would wait
+about three seconds for the lingering server instead.
+
 ### PlayRequest: who sets what
 
 | Caller | Fields |
 |---|---|
-| `kretro play` (`src/cli/play.cpp`) | `id`, the display flags, the panel size it asked SDL for, `backend.dgvoodoo`, `record`, `note`, `dry_run` |
+| `kretro play` (`src/cli/play.cpp`) | `id`, the display flags, the panel and its work area (`gui::desktop_size`), `backend.dgvoodoo`, `record`, `note`, `dry_run` |
 | `kretro compare` | `id`, and per run `backend.wined3d_renderer`, `stop_after` and `capture_to` |
-| the shelf (`ShelfContext::play`) | `id` only |
+| the shelf (`ShelfContext::play`) | `id`, the panel and its work area |
 | the player (`player::Player::play`) | `id`, `source` (the pack's range in the player file), `held_lock`, the game's display settings, `fullscreen`, the panel, `dry_run`, `backend.for_exe`, `game_drive` and `hooks.after_prefix` |
 | the tests | `id`, `source`, `dry_run` and a fixed `backend.fixed` |
 
@@ -270,8 +335,7 @@ order, so the mounts are closed before the lock is released.
 The shelf and the launcher are built from the same parts:
 
 - **`gui::Page`** (`src/gui/page.h`) is one screen. It has `draw()`, and
-  optionally `back()` (Escape, and pad B in the launcher), `dropped(path)`
-  and `busy()`.
+  optionally `back()` (Escape and pad B), `dropped(path)` and `busy()`.
 - **`gui::Pages<Id, N>`** holds one page per value of the host's `Screen`
   enum, and knows which one is current. Changing page runs no code: there
   are deliberately no enter or leave hooks.
@@ -287,6 +351,82 @@ The shelf and the launcher are built from the same parts:
   screen through `go` without knowing which pages exist. The few pages that
   need another page (the Game page opening the wizard, for example) are
   given it when they are constructed.
+- **Focus** (`src/gui/focus.h`) is where the keyboard and the pad are. Each
+  page window remembers the item that had the focus and comes back to it;
+  otherwise it opens on the item it marked with `default_focus()`. Layout
+  children and item panels are flattened (`ImGuiChildFlags_NavFlattened`),
+  so the arrows cross them; panels of text are one stop that the keys scroll
+  (`begin_text_panel`). The hosts take Escape and pad B only when
+  `back_allowed()` (no popup, no field being typed in); a modal answers them
+  itself through `modal_cancelled()`. The event loop's `note_input` keeps the
+  focus shown while the keyboard or the pad is in use.
+- **Blocks** (`src/gui/blocks.h`) are the larger pieces pages are built
+  from, each one or more ordinary ImGui items under the caller's labels. The
+  two game pages (kretro's and the player's) are a hero band over the game's
+  picture and its blurred copy (`Textures::backdrop_*`), an action bar with
+  the play or install button, the stats (`stat`) and the secondary actions
+  as ghost buttons, and the page's sections under it, all in one region that
+  scrolls the page from edge to edge (`begin_page_scroll`). Their header is a
+  one-line trail (`set_page_trail`) since the hero says the title, and both
+  list sessions with `session_log`.
+  kretro's shelf is a `nav_sidebar` of the other screens, whose rows call
+  `ShelfContext::nav(letter)`, the same actions the host's typed letters take
+  (`ShelfHost::shortcut`), with a carousel of recent games and a grid beside
+  it. Its tiles are noted with `tiles_item()` (`focus.h`), so Home and End
+  go to the first and last and PageUp and PageDown page the main column and
+  move to the nearest tile. Its view and sort are members of `ShelfPage` and never saved; the typed
+  filter stays the host's (TEXTINPUT), shown in a field that is not an ImGui
+  input.
+  The player's grid (`GridPage`) has no header (`set_page_bare`): a hero band
+  from the window's top edge for the game the focus is on, with the banner
+  and the settings button laid over its top and Play with its stats over its
+  foot (`HeroSpec::top` / `foot`), cross-fading from the game it showed
+  (`HeroSpec::was_*`, `mix`). Under it the games are a carousel of covers,
+  or past twelve games a grid in its own scrolling region. On the wide
+  breakpoint the page keeps to the grid's centred column
+  (`content_max_w(Content::Grid)`, `HeroSpec::content_right`); the band's
+  picture still spans the window.
+  The wizard's steps and the Bundles editor are flows: a one-line trail for
+  a header, a `stepper` across the top (its nodes are buttons only for the
+  steps the flow already lets you go to: for the wizard, the ones Escape
+  would walk back to, `Wizard::can_go_back_to`; for a bundle, every step),
+  the step in a scrolling pane, and a `flow_footer` pinned at the foot with
+  Back and the step's primary. Back calls the same code Escape does
+  (`Wizard::back`, `Bundles::back`; on the wizard's first step, where the
+  shelf answers Escape, it presses Escape with `press_escape`), and the
+  primary keeps the label and ID of the button it replaced. The wizard heads
+  each step's content with its title (`step_heading`) in a form-width
+  column; the install step folds the stepper to one line and gives the stage
+  the rest. The Bundles list is a grid of cards (`tile_ex` with the bundle's
+  banner or first cover) after a New bundle card, each with Open and Build
+  again under it, shown while the card has the focus or the pointer.
+  The other pages have the same trail for a header and put their title at
+  the head of a centred column (`centre_column`, `content_max_w`,
+  `step_heading`). Settings pages are rows (`setting_begin` /
+  `setting_end`) whose combos are `step_combo`: Left and Right, while the
+  combo has the keys, set the same value picking from its list does, and the
+  focus stays on it. A game's timeline and a player's saves list snapshots
+  as `snapshot_card`s, whose ghost button keeps the old Restore label and ID;
+  the doctor's headings carry their verdict (`section(label, BadgeKind)`);
+  the player's Checking and Blocked screens are a `centred_card` over the
+  bundle's blurred banner with no header (`set_page_bare`).
+- **Motion** (`src/gui/anim.h`) is asked for, never run: a widget asks each
+  frame for the value to draw at (`anim_to`, `anim01`, `fade_in`), kept in
+  its window's storage and stepped by the frame's time held to 50 ms, so it
+  takes the same time at any frame rate. `PageWindow` fades the page in over
+  120 ms by scaling the alpha of what the page and its child windows drew
+  (the palette colours pages draw with by hand do not go through the
+  style's alpha); the status bar is on the background layer and is not
+  faded. `reduce_motion()` (`KRETRO_REDUCE_MOTION`) snaps every one.
+- **Sections** (`nav_section_begin` / `nav_section_end`, `focus.h`) split a
+  page into the parts Tab, Shift+Tab and the pad's LB and RB move between,
+  each landing on the item it last had or its first. The shelf's are the
+  sidebar, the recent row and the grid; the launcher grid's are the hero band
+  and the row (or grid) of games; a wizard or bundle step's are the stepper,
+  the step and the footer; kretro's settings' are the window, scaling and
+  folders, the Library's the folders and the discs, the Import page's the
+  pack and its browser, and a player's saves' the transfer band and the
+  snapshots.
 - **`gui::Job`** runs a long task on a worker thread with a log. The shelf and
   the wizard show it in the shared "busy" modal (`draw_job_modal`). The
   launcher has its own smaller working modal, and chains work with

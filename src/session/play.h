@@ -31,10 +31,11 @@ class GameLock;
 // Who sets what. The kretro CLI's play sets the id, the display flags, the
 // panel it asked SDL for, dgvoodoo, record, note and dry_run; its compare
 // sets the id and, per run, wined3d_renderer, stop_after and capture_to. The
-// shelf sets only the id. The player sets the id, the source, held_lock, the
-// game's own display settings, fullscreen, the panel, dry_run, the for_exe
-// backend decision, game_drive and after_prefix. The tests set the id, the
-// source, dry_run and a fixed backend.
+// shelf sets the id, the panel and the hooks say, screen_up and
+// stop_requested. The player sets the id, the source, held_lock, the game's
+// own display settings, fullscreen, the panel, dry_run, the for_exe backend
+// decision, game_drive and after_prefix, and its launcher say and screen_up.
+// The tests set the id, the source, dry_run and a fixed backend.
 
 // How this session should reach the panel.
 struct DisplayOptions {
@@ -45,6 +46,9 @@ struct DisplayOptions {
   // window, the terminal asks SDL once. Zero means unknown, and then nothing
   // is assumed.
   uint32_t panel_w = 0, panel_h = 0;
+  // The work area, which a windowed game has to fit in; see
+  // config::Panel. Zero means the same as the panel.
+  uint32_t usable_w = 0, usable_h = 0;
   bool fullscreen = false;  // ORed with the geometry's own fullscreen
 };
 
@@ -82,6 +86,22 @@ struct Hooks {
   std::function<void(rt::Env& wine_env, const std::filesystem::path& prefix,
                      const std::filesystem::path& game)>
       after_prefix;
+
+  // Each line the session says, as it says it. The lines go to stderr
+  // whether or not this is set; a window that has no terminal shows them
+  // here, so the minute a fresh prefix takes is not a minute of nothing.
+  // Called on the thread play runs on.
+  std::function<void(const std::string& line)> say;
+
+  // Called once, when the game's own screen is up and the game is about to
+  // start: the moment a window that stood in for it may go. Not called on a
+  // dry run, or when play fails before then. On the thread play runs on.
+  std::function<void()> screen_up;
+
+  // Asked between the steps before the game starts. True ends the session
+  // there, with a runtime_error saying it was stopped, and the mounts are
+  // released on the way out. Once the game has started it is not asked.
+  std::function<bool()> stop_requested;
 };
 
 struct PlayRequest {

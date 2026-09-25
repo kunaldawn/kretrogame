@@ -773,6 +773,10 @@ static void test_cli() {
   CHECK(p({"-h"}).kind == K::Help);
   c = p({"input", "--display", ":9", "--pid", "42"});
   CHECK(c.kind == K::Input && c.rest.size() == 4);
+  // The launcher's own measure of the panel, from a process whose video is
+  // down.
+  CHECK(p({"panel"}).kind == K::Panel);
+  CHECK(p({"panel", "now"}).kind == K::Error);
 
   // Refusals, each saying what was wrong.
   c = p({"play"});
@@ -1125,6 +1129,195 @@ static void test_wine_home_is_confined() {
   CHECK_EQ(data, size_t(1));
 }
 
+// Wine commands run before the compositor get no display. Both names are there
+// with an empty value rather than missing: a missing one falls back to the
+// host's (winewayland connects to wayland-0), and only an empty one leaves Wine
+// on its null driver.
+static void test_offscreen_env_has_no_display() {
+  rt::Env e;
+  e.root = "/rt";
+  e.library_path = "/rt/lib";
+  e.set("DISPLAY", ":0");
+  e.set("WINEPREFIX", "/state/g/prefix");
+  rt::Env o = rt::offscreen(e);
+  auto count = [&](const std::string& k) {
+    size_t n = 0;
+    for (const auto& kv : o.vars) n += kv.first == k;
+    return n;
+  };
+  CHECK_EQ(count("DISPLAY"), size_t(1));
+  CHECK_EQ(count("WAYLAND_DISPLAY"), size_t(1));
+  CHECK_EQ(o.get("DISPLAY"), std::string());
+  CHECK_EQ(o.get("WAYLAND_DISPLAY"), std::string());
+  CHECK_EQ(o.get("WINEPREFIX"), std::string("/state/g/prefix"));
+  CHECK_EQ(o.vars.size(), size_t(3));
+  CHECK_EQ(o.root, fs::path("/rt"));
+  CHECK_EQ(o.library_path, std::string("/rt/lib"));
+  // The environment it came from keeps its display: the game needs it.
+  CHECK_EQ(e.get("DISPLAY"), std::string(":0"));
+  CHECK_EQ(e.vars.size(), size_t(2));
+}
+
+static double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static void test_run_returns_with_its_child() {
+  section("proc: run returns when its program exits, not when what it left behind does");
+  // A Wine command leaves its wineserver and services running for seconds,
+  // each holding the command's stdout; a daemon holds it for as long as it
+  // lives. The call is over when the program is.
+  auto t0 = std::chrono::steady_clock::now();
+  ProcResult r = kg::run({"/bin/sh", "-c", "echo before; sleep 30 & echo \"daemon=$!\"; echo after"});
+  const double took = seconds_since(t0);
+  CHECK(r.ok());
+  CHECK(took < 1.0);
+  CHECK(contains(r.out, "before"));
+  CHECK(contains(r.out, "after"));
+  // The daemon is this test's to end.
+  const size_t at = r.out.find("daemon=");
+  if (at != std::string::npos) {
+    const pid_t daemon = static_cast<pid_t>(std::atoi(r.out.c_str() + at + 7));
+    if (daemon > 0) kill(daemon, SIGKILL);
+  }
+
+  // The status and the output of a program that fails are still its own.
+  r = kg::run({"/bin/sh", "-c", "echo no >&2; exit 3"});
+  CHECK_EQ(r.status, 3);
+  CHECK(contains(r.out, "no"));
+
+  // A program that writes more than a pipe holds is read while it runs.
+  r = kg::run({"/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' x"});
+  CHECK(r.ok());
+  CHECK_EQ(r.out.size(), size_t(200000));
+}
+
+static void test_run_timeout_covers_the_read() {
+  section("proc: a timeout ends a program that is still writing, or still silent");
+  // Blocked in the read: the program neither writes nor exits. The timeout
+  // used to be looked at only once the output had ended.
+  auto t0 = std::chrono::steady_clock::now();
+  ProcOptions po;
+  po.timeout_sec = 1;
+  ProcResult r = kg::run({"/bin/sh", "-c", "echo started; exec sleep 30"}, po);
+  const double took = seconds_since(t0);
+  CHECK(r.signalled);
+  CHECK_EQ(r.signal, SIGKILL);
+  CHECK(!r.ok());
+  CHECK(took >= 0.9 && took < 3.0);
+  CHECK(contains(r.out, "started"));
+
+  // Without capture, as before.
+  po.capture = false;
+  t0 = std::chrono::steady_clock::now();
+  r = kg::run({"/bin/sleep", "30"}, po);
+  CHECK(r.signalled);
+  CHECK(seconds_since(t0) < 3.0);
+
+  // A program that finishes in time is not touched.
+  po.capture = true;
+  po.timeout_sec = 5;
+  r = kg::run({"/bin/sh", "-c", "echo quick"}, po);
+  CHECK(r.ok());
+  CHECK(contains(r.out, "quick"));
+}
+
+static std::atomic<int> g_own_handler_calls{0};
+static void own_handler(int) { ++g_own_handler_calls; }
+
+static void test_session_restores_signal_handlers(const fs::path& tmp) {
+  section("session: a session puts back the signal handlers it found");
+  // The shelf and a launcher carry on after a game. SDL's handlers were
+  // replaced for good by the session's, which exits on the spot. Here the
+  // mount fails at once, the session ends, and the handler before it must
+  // be the one in place again.
+  fs::path file = tmp / "classics.run";
+  player::Bundle b = player::Bundle::open(file);
+  const bundle::Entry* e = b.pack("example");
+  fs::path bin = tmp / "restore-bin";
+  write_file(bin / "fusermount3", "#!/bin/sh\nexit 0\n");
+  write_file(bin / "dwarfs", "#!/bin/sh\nexit 1\n");
+  fs::permissions(bin / "fusermount3", fs::perms::owner_all);
+  fs::permissions(bin / "dwarfs", fs::perms::owner_all);
+  pid_t pid = fork();
+  if (pid == 0) {
+    alarm(60);
+    const char* path = std::getenv("PATH");
+    setenv("PATH", (bin.string() + ":" + (path ? path : "/usr/bin:/bin")).c_str(), 1);
+    setenv("KRETRO_DWARFS", (bin / "dwarfs").c_str(), 1);
+    struct sigaction own {};
+    own.sa_handler = own_handler;
+    sigemptyset(&own.sa_mask);
+    for (int sig : {SIGINT, SIGTERM, SIGHUP}) sigaction(sig, &own, nullptr);
+    session::PlayRequest req;
+    req.id = "example";
+    session::Source s;
+    s.file = file;
+    s.off = b.toc.at(*e);
+    s.len = e->len;
+    s.may_unpack = false;
+    req.source = s;
+    req.dry_run = true;
+    try {
+      session::play(rt::Env{}, req);
+    } catch (const std::exception&) {
+    }
+    int wrong = 0;
+    for (int sig : {SIGINT, SIGTERM, SIGHUP}) {
+      struct sigaction now {};
+      sigaction(sig, nullptr, &now);
+      if (now.sa_handler != own_handler) ++wrong;
+    }
+    // And it is called, rather than the session's exit.
+    raise(SIGTERM);
+    _exit(wrong == 0 && g_own_handler_calls == 1 ? 0 : 10 + wrong);
+  }
+  int st = 0;
+  waitpid(pid, &st, 0);
+  CHECK(WIFEXITED(st));
+  CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+}
+
+static void test_play_stops_when_asked(const fs::path& tmp) {
+  section("session: a stop asked before the prefix is touched ends the session there");
+  fs::path file = tmp / "classics.run";
+  player::Bundle b = player::Bundle::open(file);
+  const bundle::Entry* e = b.pack("example");
+  pid_t pid = fork();
+  if (pid == 0) {
+    alarm(60);
+    // The stand-in from test_player_file, which unpacks GAME.EXE.
+    setenv("KRETRO_DWARFS", (tmp / "fake-dwarfs").c_str(), 1);
+    session::PlayRequest req;
+    req.id = "example";
+    session::Source s;
+    s.file = file;
+    s.off = b.toc.at(*e);
+    s.len = e->len;
+    s.no_fuse = true;
+    s.may_unpack = true;
+    s.extract_dir = tmp / "stop-unpacked";
+    req.source = s;
+    req.dry_run = true;
+    std::vector<std::string> said;
+    req.hooks.say = [&said](const std::string& l) { said.push_back(l); };
+    req.hooks.stop_requested = [] { return true; };
+    bool stopped = false;
+    try {
+      session::play(rt::Env{}, req);
+    } catch (const std::exception& ex) {
+      stopped = contains(ex.what(), "stopped before example started");
+    }
+    // Nothing of the prefix was made, and the window heard what was said.
+    const bool no_prefix = !fs::exists(game_prefix_dir("example") / ".kretro-ready");
+    const bool heard = !said.empty() && contains(said.front(), "game directory");
+    _exit(stopped && no_prefix && heard ? 0 : 1 + (stopped ? 0 : 1) + (no_prefix ? 0 : 2) + (heard ? 0 : 4));
+  }
+  int st = 0;
+  waitpid(pid, &st, 0);
+  CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+}
+
 int main() {
   const char* base = std::getenv("TMPDIR");
   fs::path tmp = fs::path(base && *base ? base : "/tmp") / ("kretro-test-player-" + std::to_string(getpid()));
@@ -1159,6 +1352,11 @@ int main() {
     test_signal_while_mounting(tmp);
     test_tied_children();
     test_wine_home_is_confined();
+    test_offscreen_env_has_no_display();
+    test_run_returns_with_its_child();
+    test_run_timeout_covers_the_read();
+    test_session_restores_signal_handlers(tmp);
+    test_play_stops_when_asked(tmp);
   } catch (const std::exception& e) {
     kgtest::unexpected(e);
   }

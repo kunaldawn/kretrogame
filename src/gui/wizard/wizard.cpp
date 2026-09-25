@@ -1,6 +1,8 @@
 #include "wizard.h"
 
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -13,6 +15,7 @@
 #include "../../util/paths.h"
 #include "../job_modal.h"
 #include "../palette.h"
+#include "../widgets.h"
 #include "words.h"
 
 namespace kg::gui {
@@ -20,8 +23,17 @@ namespace fs = std::filesystem;
 
 using wizard_detail::set_buf;
 
+namespace {
+
+// The steps by the short names the rail and the status bar's path give them,
+// in Step's order.
+const char* const kStepNames[] = {"sources", "name", "what", "install", "where",
+                                  "runs", "looks", "build", "done"};
+
+}  // namespace
+
 Wizard::Wizard(const rt::Env& e, SDL_Renderer* ren, Fonts fonts)
-    : env_(e), ren_(ren), big_(fonts.big) {}
+    : env_(e), ren_(ren), fonts_(fonts) {}
 
 Wizard::~Wizard() {
   // The worker holds a Build whose destructor removes gigabytes of staging
@@ -207,24 +219,54 @@ void Wizard::take_pending_sources() {
 
 void Wizard::ask_abandon() { confirm_abandon_ = true; }
 
-bool Wizard::back() {
-  if (job_.running() && step_ == Step::Installing) { confirm_abandon_ = true; return true; }
-  if (job_.running()) return true;   // a job is up; the modal owns the screen
-  switch (step_) {
-    case Step::Sources: return false;   // not ours: the caller drops to the shelf
-    case Step::Identity: step_ = Step::Sources; return true;
-    case Step::What: step_ = Step::Identity; return true;
-    case Step::Installing: confirm_abandon_ = true; return true;
-    case Step::Where: step_ = Step::What; return true;
-    case Step::Runs: step_ = Step::Where; return true;
-    case Step::Presentation: step_ = Step::Runs; return true;
-    case Step::Build: step_ = Step::Presentation; return true;
+bool Wizard::step_before(Step s, Step* before) {
+  switch (s) {
+    case Step::Identity: *before = Step::Sources; return true;
+    case Step::What: *before = Step::Identity; return true;
+    case Step::Where: *before = Step::What; return true;
+    case Step::Runs: *before = Step::Where; return true;
+    case Step::Presentation: *before = Step::Runs; return true;
+    case Step::Build: *before = Step::Presentation; return true;
+    case Step::Sources:
+    case Step::Installing:
     case Step::Done: return false;
   }
   return false;
 }
 
+bool Wizard::back() {
+  if (job_.running() && step_ == Step::Installing) { confirm_abandon_ = true; return true; }
+  if (job_.running()) return true;   // a job is up; the modal owns the screen
+  switch (step_) {
+    case Step::Sources: return false;   // not ours: the caller drops to the shelf
+    case Step::Installing: confirm_abandon_ = true; return true;
+    case Step::Done: return false;
+    default: break;
+  }
+  return step_before(step_, &step_);
+}
+
+bool Wizard::can_go_back_to(Step to) const {
+  if (job_.running()) return false;
+  Step s = step_;
+  while (s != to) {
+    if (!step_before(s, &s)) return false;
+  }
+  return true;
+}
+
 WizardOutcome Wizard::draw() {
+  // The status bar's path would otherwise be the page title made into a
+  // slug, and the titles here are questions.
+  set_chrome_path(std::string("~/wizard/") + kStepNames[static_cast<int>(step_)]);
+  // The header names the flow, and each step heads its own content with its
+  // title; the install step, which gives the whole page to the installer,
+  // says its title in the header instead.
+  set_page_trail(step_ == Step::Installing ? "kretro \xe2\x80\xba add a game \xe2\x80\xba installing " + draft_.name
+                                           : std::string("kretro \xe2\x80\xba add a game"));
+  // The install step turns the keyboard's nav off for the installer; every
+  // other step has it, however the install step was left.
+  if (step_ != Step::Installing) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   switch (step_) {
     case Step::Sources: sources_page(); break;
     case Step::Identity: identity_page(); break;
@@ -290,32 +332,142 @@ void Wizard::modal() {
           "Abandon this? What is running is stopped and its staging tree removed. Nothing "
           "goes into your library.");
       ImGui::Spacing();
-      if (ImGui::Button("Abandon it")) {
+      // The same pair as the abandon popup, marked the same way: the one that
+      // throws work away in the error colour, the safe one as the primary,
+      // which Escape and the pad's B answer.
+      if (dialog_button("Abandon it", DialogButton::Danger)) {
         if (build_) build_->cancel();
         abandoning_ = true;
         confirm_abandon_ = false;
       }
-      ImGui::SameLine();
-      if (ImGui::Button("Keep going")) confirm_abandon_ = false;
+      if (dialog_button("Keep going", DialogButton::Primary, true)) confirm_abandon_ = false;
     } else {
+      // On the line of the button beside it, rather than at the top of it.
+      ImGui::AlignTextToFramePadding();
       ImGui::TextDisabled("working...");
       ImGui::SameLine();
-      if (ImGui::SmallButton("stop")) { if (build_) build_->cancel(); }
+      if (dialog_button("stop")) {
+        if (build_) build_->cancel();
+      }
     }
   };
   // A question the job answered by finishing. Left standing it would put
   // "Abandon?" up over a step that had already succeeded.
   hooks.on_finished_frame = [this] { confirm_abandon_ = false; };
   hooks.on_close = [this] { finish_job(); };
-  draw_job_modal(job_, big_, hooks);
+  draw_job_modal(job_, fonts_.big(), hooks);
 }
 
 void Wizard::trouble_banner() {
   if (trouble_.empty()) return;
-  ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
-  ImGui::TextWrapped("%s", trouble_.c_str());
-  ImGui::PopStyleColor();
-  ImGui::Spacing();
+  badge_line(BadgeKind::Fail, trouble_, kWarn);
+  vgap(4);
+}
+
+// Copy and unzip never visit "install", and it is lit as passed all the same:
+// the stepper is a map of the wizard, not a log of this run.
+void Wizard::step_top() {
+  constexpr int n = 9;
+  const int at = static_cast<int>(step_);
+  nav_section_begin("stepper");
+  const int picked = stepper(
+      "steps", kStepNames, n, at, [at](int i) { return StepInfo{i < at ? StepState::Done : StepState::Todo, 0}; },
+      [this](int i) { return can_go_back_to(static_cast<Step>(i)); }, step_ == Step::Installing);
+  nav_section_end();
+  // A step further back is Escape pressed until it is there, through the same
+  // code, so it goes nowhere Escape would not.
+  if (picked >= 0) {
+    const Step to = static_cast<Step>(picked);
+    for (int i = 0; i < n && step_ != to && back();) ++i;
+  }
+  vgap(6);
+}
+
+float Wizard::footer_block() const { return flow_footer_height() + ImGui::GetStyle().ItemSpacing.y; }
+
+const char* Wizard::step_title(const std::string& title) {
+  heading_ = title;
+  return heading_.c_str();
+}
+
+void Wizard::begin_body(float below) {
+  nav_section_begin("content");
+  // The scrollbar's grab in the accent's dim green rather than the rules'
+  // grey, so a body with more below the fold says so. Read as the child
+  // begins, so it is popped straight away.
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, kAccentDim);
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, alpha(kAccent, 0.7f));
+  // Flattened, so the pad and the keyboard move between the body and the
+  // footer's button as though they were one window, as they were.
+  ImGui::BeginChild("##body", ImVec2(0, -(footer_block() + below)), ImGuiChildFlags_NavFlattened);
+  ImGui::PopStyleColor(2);
+  // Centred as though the scrollbar were not there, so the column lines up
+  // with anything the step keeps between the body and the footer.
+  body_indent_ = ImGui::GetScrollMaxY() > 0 ? ImGui::GetStyle().ScrollbarSize : 0.0f;
+  if (body_indent_ > 0) ImGui::Indent(body_indent_);
+  centre_column(content_max_w(Content::Form));
+  step_heading(heading_);
+  // The step opens on its first control; a step that says otherwise says so
+  // further down.
+  default_focus_next();
+}
+
+void Wizard::end_body() {
+  end_centre_column();
+  if (body_indent_ > 0) ImGui::Unindent(body_indent_);
+  // A body cut off at its bottom edge cuts a line of text through its middle,
+  // which reads as a drawing fault. Fading the last of it into the page and
+  // saying there is more makes the cut look meant, and says to scroll.
+  const float left = ImGui::GetScrollMaxY() - ImGui::GetScrollY();
+  if (left > 0.5f) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const float x0 = wp.x;
+    const float x1 = wp.x + ImGui::GetWindowContentRegionMax().x;
+    const float y1 = wp.y + ImGui::GetWindowSize().y;
+    const float y0 = y1 - std::round(px(40));
+    dl->AddRectFilledMultiColor(ImVec2(x0, y0), ImVec2(x1, y1), u32(kBg0, 0.0f), u32(kBg0, 0.0f),
+                                u32(kBg0), u32(kBg0));
+    ImFont* f = fonts_.small();
+    const float fs = font_px(f);
+    // U+2193, in the small font's arrows.
+    const char* more = f->FindGlyphNoFallback(0x2193) ? "\xe2\x86\x93 more" : "more";
+    const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, more);
+    dl->AddText(f, fs, ImVec2(std::round(x1 - ts.x - px(4)), std::round(y1 - ts.y - px(2))),
+                u32(kDim), more);
+  }
+  ImGui::EndChild();
+  vgap(4);
+}
+
+bool Wizard::step_footer(const char* label, bool enabled, bool is_default,
+                         const std::function<void(float)>& extra) {
+  nav_section_end();
+  nav_section_begin("footer");
+  // The footer's top, as flow_footer finds it: the foot of the page.
+  const float top = std::max(ImGui::GetCursorScreenPos().y,
+                             ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y - flow_footer_height());
+  FlowFooter f;
+  // Back does what Escape does here: a step back, or on the first step
+  // leaving the wizard, which is the shelf's to do. On the last step Escape
+  // goes nowhere a step back, so there is no Back.
+  f.back = step_ == Step::Sources ? "Cancel" : step_ == Step::Done ? nullptr
+                                                                   : "Back";
+  f.primary = label;
+  f.primary_enabled = enabled;
+  f.primary_default = is_default;
+  const FlowAction act = flow_footer(f);
+  if (extra) extra(top);
+  nav_section_end();
+  if (act == FlowAction::Back) {
+    if (!back()) press_escape();
+  }
+  return act == FlowAction::Primary;
+}
+
+float Wizard::prose_wrap() {
+  const float measure = ImGui::CalcTextSize("0").x * 90.0f;
+  return ImGui::GetCursorPosX() + std::min(measure, ImGui::GetContentRegionAvail().x);
 }
 
 void Wizard::abandon_popup() {
@@ -323,20 +475,30 @@ void Wizard::abandon_popup() {
     ImGui::OpenPopup("Abandon?");
     confirm_abandon_ = false;
   }
-  if (!ImGui::BeginPopupModal("Abandon?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-  ImGui::Text("Abandon this install?");
+  // A width of our own and a height that follows the text, headed by the
+  // question.
+  if (!dialog_begin("Abandon?", 620, "Abandon?")) return;
+  badge(BadgeKind::Warn);
+  ImGui::SameLine(0, badge_gap());
+  ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+  ImGui::TextUnformatted("Abandon this install?");
+  ImGui::PopStyleColor();
+  vgap(2);
   ImGui::TextWrapped(
       "The installer is stopped and its staging tree removed. Nothing goes into your "
       "library, and you start again from the disc.");
-  ImGui::Spacing();
-  if (ImGui::Button("Abandon it")) {
+  dialog_footer();
+  // The one that throws the install away in the error colour, and staying
+  // put as the primary: the two must not look like equals.
+  if (dialog_button("Abandon it", DialogButton::Danger)) {
     if (build_) build_->cancel();
     abandoning_ = true;
     ImGui::CloseCurrentPopup();
   }
-  ImGui::SameLine();
-  if (ImGui::Button("Keep going")) ImGui::CloseCurrentPopup();
-  ImGui::EndPopup();
+  // Going on is what Escape and the pad's B answer, and where the focus
+  // starts: throwing an install away takes a deliberate press.
+  if (dialog_button("Keep going", DialogButton::Primary, true)) ImGui::CloseCurrentPopup();
+  dialog_end();
 }
 
 // Everything between "go" and the first frame of the installer, on the worker:

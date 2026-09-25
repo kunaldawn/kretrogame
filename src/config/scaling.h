@@ -31,8 +31,21 @@ struct Geometry {
 uint32_t largest_fitting_scale(uint32_t game_w, uint32_t game_h, uint32_t panel_w,
                                uint32_t panel_h);
 
-// panel_w or panel_h of zero means the panel size is unknown, in which case
+// The screen a game goes on. w,h is the whole panel, which the fullscreen
+// modes (Native, Fit) cover. usable_w,usable_h is the work area, the part the
+// desktop leaves to windows once its own panels and docks are drawn, and a
+// windowed game (Integer) has to fit in it or the window manager squeezes the
+// window. A usable size of zero means the same as the panel.
+struct Panel {
+  uint32_t w = 0, h = 0;
+  uint32_t usable_w = 0, usable_h = 0;
+};
+
+// A panel w or h of zero means the panel size is unknown, in which case
 // nothing is assumed: scale 1, windowed.
+Geometry compute_geometry(uint32_t game_w, uint32_t game_h, const Panel& panel, const Display& d);
+
+// The same with no work area known: the whole panel is usable.
 Geometry compute_geometry(uint32_t game_w, uint32_t game_h, uint32_t panel_w, uint32_t panel_h,
                           const Display& d);
 

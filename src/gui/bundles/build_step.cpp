@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <exception>
@@ -15,6 +16,7 @@
 #include "../format.h"
 #include "../widgets.h"
 #include "bundles_page.h"
+#include "choices.h"
 
 namespace kg::gui {
 using namespace kg::bundle;
@@ -122,19 +124,27 @@ void Bundles::pump_build() {
 }
 
 void Bundles::build_step() {
-  ImGui::TextUnformatted("Write it to");
-  ImGui::SameLine(200);
-  ImGui::TextUnformatted(draft_.out_dir.empty() ? "(no folder chosen)" : draft_.out_dir.c_str());
-  ImGui::SameLine();
-  if (ImGui::SmallButton("Choose folder...")) {
-    if (!draft_.out_dir.empty()) browse_dir_ = draft_.out_dir;
-    browse_ = Browse::Folder;
+  section("build");
+  if (form_begin("where", {"Write it to"})) {
+    form_row("Write it to");
+    // The button first, so a long folder is what gets cut short.
+    // A button as tall as the page's fields, so the form keeps one rhythm.
+    if (ImGui::Button("Choose folder...")) {
+      if (!draft_.out_dir.empty()) browse_dir_ = draft_.out_dir;
+      browse_ = Browse::Folder;
+    }
+    ImGui::SameLine(0, std::round(px(12)));
+    if (draft_.out_dir.empty()) ImGui::TextDisabled("(no folder chosen)");
+    else elided_text(draft_.out_dir, kCyan);
+    if (version_is_safe(draft_.version) && kg::id_is_safe(draft_.id)) {
+      ImGui::TextDisabled("as");
+      ImGui::SameLine();
+      elided_text(output_name(draft_), kCyan);
+    }
+    ImGui::EndTable();
   }
-  if (version_is_safe(draft_.version) && kg::id_is_safe(draft_.id)) {
-    ImGui::TextDisabled("as %s", output_name(draft_).c_str());
-  }
-  if (!base_trouble_.empty()) warn_text(base_trouble_);
-  ImGui::Spacing();
+  if (!base_trouble_.empty()) badge_line(BadgeKind::Fail, base_trouble_);
+  ImGui::Dummy(ImVec2(0, std::round(px(6))));
 
   if (worker_.joinable()) {
     uint64_t done = progress_done_, total = progress_total_;
@@ -143,14 +153,23 @@ void Bundles::build_step() {
       std::lock_guard<std::mutex> lk(build_mutex_);
       stage = progress_stage_;
     }
-    float frac = total ? static_cast<float>(static_cast<double>(done) / static_cast<double>(total)) : 0.0f;
-    std::string words = stage + "  " + human_size(done) + " of " + human_size(total);
-    ImGui::ProgressBar(frac, ImVec2(-1, 36), words.c_str());
+    // Unknown until the build has counted what it will write: the bar then
+    // slides rather than sitting at nought.
+    float frac = total ? static_cast<float>(static_cast<double>(done) / static_cast<double>(total)) : -1.0f;
+    spinner();
+    ImGui::SameLine();
+    elided_text(stage.empty() ? std::string("building") : stage);
+    std::string words = human_size(done) + " of " + human_size(total);
+    block_progress(frac, 0, total ? words.c_str() : nullptr);
+    ImGui::Dummy(ImVec2(0, std::round(px(6))));
     ImGui::BeginDisabled(cancel_.load());
-    if (ImGui::Button(cancel_ ? "Cancelling..." : "Cancel", ImVec2(200, 44))) cancel_ = true;
+    // An ordinary button: the big one is Build's, and this is not an
+    // action to draw the eye to.
+    if (ImGui::Button(cancel_ ? "Cancelling..." : "Cancel")) cancel_ = true;
     ImGui::EndDisabled();
-    ImGui::TextDisabled("It is written as .partial, checked, and only then named %s. Cancelled, nothing is left.",
-                        output_name(draft_).c_str());
+    ImGui::Spacing();
+    colored_text(kDim, "It is written as .partial, checked, and only then named " + output_name(draft_) +
+                           ". Cancelled, nothing is left.");
     return;
   }
 
@@ -158,34 +177,36 @@ void Bundles::build_step() {
   std::vector<Check> checks = run_checks(draft_, facts);
   std::vector<std::string> blocking = blockers(draft_, facts);
   bool ready = ready_to_build(draft_, checks, blocking);
-  ImGui::BeginDisabled(!ready || !base_trouble_.empty());
-  if (ImGui::Button("Build", ImVec2(260, 56))) start_build();
-  ImGui::EndDisabled();
+  // Build itself is the footer's action (bundle_page); what stands in its
+  // way is said here, in full.
   if (!ready) {
-    for (const std::string& b : blocking) ImGui::TextDisabled("%s", b.c_str());
+    for (const std::string& b : blocking) badge_line(BadgeKind::Fail, b);
     size_t open = std::count_if(checks.begin(), checks.end(), [&](const Check& c) { return !draft_.acked(c.id); });
-    if (open) ImGui::TextDisabled("%zu check(s) neither fixed nor acknowledged: see Check.", open);
-    if (!draft_.rights) ImGui::TextDisabled("Rights: not yet ticked.");
+    if (open) {
+      badge_line(BadgeKind::Warn, std::to_string(open) + " check(s) neither fixed nor acknowledged: see Check.");
+    }
+    if (!draft_.rights) badge_line(BadgeKind::Warn, "Rights: not yet ticked.");
   }
   std::string err, note = build_note_;
   {
     std::lock_guard<std::mutex> lk(build_mutex_);
     err = build_error_;
   }
-  if (!err.empty()) warn_text(err);
-  if (!note.empty()) good_text(note);
+  if (!err.empty()) badge_line(BadgeKind::Fail, err);
+  if (!note.empty()) badge_line(BadgeKind::Ok, note);
   if (!draft_.last_built.empty() && note.empty()) {
-    ImGui::TextDisabled("Last built %s: %s, %s", draft_.last_built_at.c_str(), draft_.last_built.c_str(),
-                        human_size(draft_.last_size).c_str());
+    colored_text(kDim, "Last built " + draft_.last_built_at + ": " + draft_.last_built + ", " +
+                           human_size(draft_.last_size));
   }
   if (!draft_.last_built.empty() && !draft_.published) {
-    ImGui::Spacing();
+    section("publish");
     if (ImGui::Button("Mark as published")) {
       draft_.published = true;
       dirty_ = true;
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("once it has gone out: the id is then fixed");
+    ImGui::AlignTextToFramePadding();
+    elided_text("once it has gone out: the id is then fixed", kDim);
   }
 }
 

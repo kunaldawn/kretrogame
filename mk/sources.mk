@@ -82,7 +82,9 @@ GUI_SRC = $(SHELF_SRC) src/gui/gamepad_bridge.cpp src/gui/stage/stage.cpp \
           src/gui/stage/x_errors.cpp src/gui/stage/stage_probe.cpp $(WIZARD_SRC) \
           src/gui/widgets.cpp src/gui/window.cpp src/gui/texture.cpp src/gui/job.cpp \
           src/gui/job_modal.cpp src/gui/file_list.cpp $(IMGUI_SRC) $(BUNDLES_PAGE_SRC) \
-          src/gui/screen.cpp src/gui/event_loop.cpp
+          src/gui/screen.cpp src/gui/event_loop.cpp src/gui/scale.cpp src/gui/focus.cpp \
+          src/gui/anim.cpp src/gui/blocks.cpp src/gui/dialog.cpp src/gui/draw.cpp \
+          src/gui/layout.cpp src/gui/scroll.cpp src/gui/session_log.cpp src/gui/status_bar.cpp
 # The player's launcher: its host and the context its pages share, a file per
 # page or group of pages, and its modals.
 LAUNCHER_SRC = src/gui/launcher/host.cpp src/gui/launcher/context.cpp \
@@ -98,7 +100,9 @@ LAUNCHER_SRC = src/gui/launcher/host.cpp src/gui/launcher/context.cpp \
 # texture.cpp holds stb_image's one definition in each of the two programs.
 PLAYER_GUI_SRC = $(LAUNCHER_SRC) src/gui/widgets.cpp src/gui/window.cpp src/gui/texture.cpp \
           src/gui/job.cpp src/gui/gamepad_bridge.cpp $(IMGUI_SRC) src/gui/screen.cpp \
-          src/gui/event_loop.cpp
+          src/gui/event_loop.cpp src/gui/scale.cpp src/gui/focus.cpp \
+          src/gui/anim.cpp src/gui/blocks.cpp src/gui/dialog.cpp src/gui/draw.cpp \
+          src/gui/layout.cpp src/gui/scroll.cpp src/gui/session_log.cpp src/gui/status_bar.cpp
 B3_SRC  = $(B3)/blake3.c $(B3)/blake3_dispatch.c $(B3)/blake3_portable.c
 
 LIB_OBJ        = $(LIB_SRC:%.cpp=$(BUILD)/%.o)
@@ -168,19 +172,38 @@ FORMAT_CLEAN = \
                src/cli/command.h \
                src/cli/commands.cpp \
                src/cli/handlers.h \
+               src/gui/anim.cpp \
+               src/gui/anim.h \
+               src/gui/blocks.cpp \
+               src/gui/blocks.h \
+               src/gui/dialog.cpp \
+               src/gui/dialog.h \
+               src/gui/draw.cpp \
+               src/gui/draw.h \
                src/gui/event_loop.cpp \
                src/gui/event_loop.h \
                src/gui/file_list.cpp \
                src/gui/file_list.h \
+               src/gui/focus.cpp \
+               src/gui/focus.h \
                src/gui/format.h \
                src/gui/job.cpp \
                src/gui/job.h \
                src/gui/job_modal.cpp \
                src/gui/job_modal.h \
+               src/gui/layout.cpp \
+               src/gui/layout.h \
                src/gui/page.h \
                src/gui/palette.h \
+               src/gui/scale.cpp \
+               src/gui/scale.h \
                src/gui/screen.cpp \
                src/gui/screen.h \
+               src/gui/scroll.cpp \
+               src/gui/scroll.h \
+               src/gui/session_log.cpp \
+               src/gui/session_log.h \
+               src/gui/status_bar.cpp \
                src/pack/dwarfs.cpp \
                src/pack/dwarfs.h \
                src/session/input_helper.cpp \

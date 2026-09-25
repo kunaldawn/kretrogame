@@ -105,6 +105,8 @@ int play(const Player& p, const Command& c) {
   const gui::PanelSize ps = gui::desktop_size(true);
   req.panel_w = ps.w;
   req.panel_h = ps.h;
+  req.usable_w = ps.usable_w;
+  req.usable_h = ps.usable_h;
 
   for (int attempt = 0; attempt < 2; ++attempt) {
     try {

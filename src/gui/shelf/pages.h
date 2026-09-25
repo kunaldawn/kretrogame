@@ -11,17 +11,35 @@
 
 #include <SDL.h>
 
+#include "../../config/config.h"
 #include "../../gpu/probe.h"
 #include "../../install/draft.h"
 #include "../../pack/kgpack.h"
+#include "../../session/journal.h"
 #include "../../util/hash.h"
 #include "../bundles/bundles_page.h"
 #include "../page.h"
+#include "../screen.h"
 #include "../widgets.h"
 #include "../wizard/wizard.h"
 #include "context.h"
 
 namespace kg::gui::shelf {
+
+// ---- drawing the shelf's pages share ----------------------------------------
+
+// A hairline's thickness at the current scale: one whole pixel, or more.
+float hairline();
+// A rectangle's outline, `t` pixels thick (a hairline when 0), drawn inside it
+// as filled bars. AddRect's one-pixel line straddles a pixel boundary, and the
+// software renderer draws it as a smear.
+void outline(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float t = 0);
+// Lowers the text that follows onto the baseline of a small_button beside it,
+// so a row of text and a small button reads as one line, and makes the line
+// as tall as the button.
+void align_to_small_button();
+// The height of a small_button, and of a row that holds one.
+float small_button_height();
 
 class LibraryPage;
 
@@ -57,15 +75,37 @@ class WizardPage : public Page {
   Wizard wizard_;
 };
 
-// The shelf itself: every game as a tile.
+// The shelf itself: every game as a tile, the games played lately in a row
+// above them, and a sidebar of the other screens.
 class ShelfPage : public Page {
  public:
   explicit ShelfPage(ShelfContext& ctx) : ctx_(ctx) {}
   void draw() override;
 
+  // How the tiles are ordered and which of them are shown. Both are only how
+  // the shelf looks this session: nothing saves them, and the default of
+  // each is the shelf as it always was, every game in the order scanned.
+  enum class Sort { Default,
+                    Recent,
+                    Name,
+                    PlayTime };
+  enum class View { All,
+                    Installed,
+                    NotInstalled,
+                    Blocked };
+
  private:
+  // The game's tile in the grid, and its tile in the row of recent games.
   void tile(const Entry& e, float w, float h);
+  bool recent_tile(const Entry& e, float w, float h);
+  void sidebar(float height);
+  void header(size_t hits);
+
   ShelfContext& ctx_;
+  // The game last opened, as it was when the shelf was last drawn.
+  std::string drawn_selected_;
+  Sort sort_ = Sort::Default;
+  View view_ = View::All;
 };
 
 // One game.
@@ -81,6 +121,13 @@ class GamePage : public Page {
   WizardPage& wizard_;
   bool confirm_uninstall_ = false;
   bool also_saves_ = false;
+  // The game's journal and snapshots as last read, and when to read them
+  // again.
+  Refresh disk_;
+  std::vector<session::Record> journal_;
+  std::vector<std::string> gens_;
+  // What the Uninstall? question says goes, measured as it came up.
+  uint64_t prefix_bytes_ = 0, save_bytes_ = 0;
 };
 
 // A .kgpack, what it is, and taking it in.
@@ -111,7 +158,8 @@ class ImportPage : public Page {
   };
 
   void inspect_for_import(const std::filesystem::path& f);
-  void import_browser();
+  // The file browser, `height` design pixels tall.
+  void import_browser(float height);
 
   ShelfContext& ctx_;
   WizardPage& wizard_;
@@ -123,6 +171,11 @@ class ImportPage : public Page {
   // Downloads, and a pack already in games_dir() is already installed.
   bool import_browsing_ = false;
   std::filesystem::path import_dir_ = home_dir();
+  // Whether the pack's game is installed, and how long it has been played,
+  // as last looked up.
+  Refresh disk_;
+  bool installed_ = false;
+  double played_ = 0;
 };
 
 // What this machine can draw with, and what is wrong with it.
@@ -178,6 +231,12 @@ class SettingsPage : public Page {
 
  private:
   ShelfContext& ctx_;
+  // The config and the selected game's own size as last read, and when to
+  // read them again.
+  Refresh disk_;
+  config::Config cfg_;
+  uint32_t game_w_ = 640, game_h_ = 480;
+  PanelSize panel_;
 };
 
 // One game's snapshots, newest first, and going back to one.
@@ -190,12 +249,17 @@ class TimelinePage : public Page {
   ShelfContext& ctx_;
   std::string restore_gen_;
   bool confirm_restore_ = false;
+  // The game's snapshots and journal as last read, and when to read them
+  // again.
+  Refresh disk_;
+  std::vector<std::string> gens_;
+  std::vector<session::Record> recs_;
 };
 
 // The Bundles screen: the Bundles page, which does its own drawing.
 class BundlesPage : public Page {
  public:
-  explicit BundlesPage(ShelfContext& ctx) : ctx_(ctx), bundles_(ctx.env, ctx.fonts) {}
+  explicit BundlesPage(ShelfContext& ctx) : ctx_(ctx), bundles_(ctx.env, ctx.fonts, &ctx.textures) {}
   void draw() override { bundles_.draw(); }
   bool back() override { return bundles_.back(); }
   // Coming onto the screen.

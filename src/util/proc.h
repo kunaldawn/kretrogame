@@ -18,11 +18,16 @@ struct ProcOptions {
   std::vector<std::pair<std::string, std::string>> env;  // added to the child's
   std::string cwd;
   bool capture = true;   // false lets the child use our terminal
-  int timeout_sec = 0;   // 0 means wait indefinitely
+  int timeout_sec = 0;   // for the whole call; 0 means wait indefinitely
 };
 
 // argv[0] is the program path; it is executed directly, not through a shell,
 // so nothing here can be confused by a space or a quote in a game's path.
+//
+// Returns once that program has exited, with what it wrote by then (and in
+// the moment after). Processes it leaves running do not hold the call up,
+// even though they inherit its output: a Wine command's wineserver and
+// services outlive it by seconds, and a daemon for as long as it likes.
 ProcResult run(const std::vector<std::string>& argv, const ProcOptions& opt = {});
 
 // fork(), with the child sent `sig` when the thread that forked it ends -

@@ -39,17 +39,24 @@ void release_on_signal(int sig) {
   _exit(128 + sig);
 }
 
+namespace {
+constexpr int kSignals[3] = {SIGINT, SIGTERM, SIGHUP};
+}  // namespace
+
 MountInterruptGuard::MountInterruptGuard(Layers& l) : l_(&l) {
   g_active = &l;
   struct sigaction sa {};
   sa.sa_handler = release_on_signal;
   sigemptyset(&sa.sa_mask);
-  for (int sig : {SIGINT, SIGTERM, SIGHUP}) sigaction(sig, &sa, nullptr);
+  for (int i = 0; i < 3; ++i) sigaction(kSignals[i], &sa, &before_[i]);
 }
 
 MountInterruptGuard::~MountInterruptGuard() {
   close_layers(*l_);
+  // Before the handlers go back: a signal in between still finds nothing
+  // left to release, rather than a session that is half closed.
   g_active = nullptr;
+  for (int i = 0; i < 3; ++i) sigaction(kSignals[i], &before_[i], nullptr);
 }
 
 }  // namespace kg::session::detail

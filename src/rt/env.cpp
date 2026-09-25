@@ -389,4 +389,11 @@ Env wine_env(const Env& base, const fs::path& prefix, const fs::path& home) {
   return we;
 }
 
+Env offscreen(const Env& base) {
+  Env e = base;
+  e.set("DISPLAY", "");
+  e.set("WAYLAND_DISPLAY", "");
+  return e;
+}
+
 }  // namespace kg::rt

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <system_error>
@@ -33,21 +34,50 @@ constexpr uint64_t kMaxExtraFile = 16ull << 20;
 // and for the same reason: no dialog from another toolkit that a pad cannot
 // drive.
 void Bundles::browser() {
+  const bool opened = browse_shown_ != browse_;
+  browse_shown_ = browse_;
+  const ImGuiStyle& st = ImGui::GetStyle();
+  const float top = ImGui::GetCursorPosY();
   ImGui::Spacing();
-  ImGui::Separator();
   const char* what = browse_ == Browse::Folder ? "Choose a folder"
                      : browse_ == Browse::Dll  ? "Choose a file for this game"
                                                : "Choose a PNG";
-  ImGui::TextUnformatted(what);
-  ImGui::SameLine();
-  if (ImGui::SmallButton("close")) browse_ = Browse::None;
-  if (browse_ == Browse::Folder) {
-    ImGui::SameLine();
-    if (ImGui::SmallButton("use this folder")) take_file(browse_dir_);
+  // The heading and the list's own buttons share a row, the buttons where
+  // the heading's rule ends, so the list starts straight under its heading.
+  const bool folder = browse_ == Browse::Folder;
+  const float buttons_w =
+      small_button_width("close") + (folder ? small_button_width("use this folder") + st.ItemSpacing.x : 0.0f);
+  if (ImGui::BeginTable("browse-head", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
+    ImGui::TableSetupColumn("heading", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("buttons", ImGuiTableColumnFlags_WidthFixed, buttons_w);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    section(what);
+    ImGui::TableSetColumnIndex(1);
+    // section() opens with a Spacing; the same here, less the small
+    // buttons' own padding above their text, puts their words on its line.
+    ImGui::Spacing();
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - std::round(px(2)));
+    if (folder) {
+      if (small_button("use this folder")) take_file(browse_dir_);
+      ImGui::SameLine();
+    }
+    if (small_button("close")) browse_ = Browse::None;
+    ImGui::EndTable();
   }
+  // The list heads the pane (bundle_page); the first frame scrolls the pane
+  // back to its top, wherever the step had been scrolled to. The list
+  // takes half the pane from there, so the step it fills in is still in
+  // sight under it, and the keys go on from the list's last entry to the
+  // step's first field.
+  if (opened) ImGui::SetScrollY(0.0f);
+  const float head = ImGui::GetCursorPosY() - top;
+  const float fill = ImGui::GetWindowHeight() * 0.5f - head;
   FileListSpec spec;
   spec.child_id = "bundle-browse";
-  spec.height = 280;
+  // In design pixels, as file_list takes it, and never so short that the
+  // list shows only a line or two.
+  spec.height = std::max(200.0f, std::floor(fill / ui_scale()));
   spec.skip_hidden = true;
   // A folder is chosen with the button above, so its list offers no files;
   // a game's extra files may be anything, and every picture is a PNG.
@@ -56,6 +86,9 @@ void Bundles::browser() {
     if (mode == Browse::Folder) return false;
     return mode == Browse::Dll || to_lower(p.extension().string()) == ".png";
   };
+  // A step that comes up with its list open opens on the list, which is what
+  // the pane has just been scrolled to.
+  if (opened) default_focus_next();
   FilePick pick = file_list(browse_dir_, spec);
   if (pick.kind == FilePick::File) take_file(pick.path);
 }

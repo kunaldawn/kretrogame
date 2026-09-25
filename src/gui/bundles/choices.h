@@ -17,6 +17,11 @@
 
 namespace kg::gui::bundles_detail {
 
+// The room left under the last line of a step, in design pixels, so that a
+// step scrolled to its end, or a file list stretched to the pane, stops short
+// of the pane's edge.
+constexpr float kStepFoot = 16;
+
 // The words shown for bundle::kBackendNames and bundle::kDisplayModes, index
 // for index.
 inline const char* const kBackendWords[] = {"auto", "DXVK", "WineD3D on Vulkan", "WineD3D on OpenGL", "cnc-ddraw"};

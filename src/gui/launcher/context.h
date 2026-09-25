@@ -4,6 +4,7 @@
 // the way from one screen to another.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -79,12 +80,33 @@ struct LauncherContext {
   void maybe_auto_play();
 
   // ---- playing ------------------------------------------------------------
+  // Counts the sessions played, so a page keeping a copy of a game's journal
+  // or snapshots reads it again when this changes.
+  unsigned generation = 0;
   const Texture* cover(const std::string& id);
+  // The same picture blurred, for the backdrop of the game's hero band.
+  const Texture* cover_backdrop(const std::string& id);
   void play(const std::string& id);
   void play_checked(const std::string& id);
   void play_now(const std::string& id);
+  // Called every frame by the host: hides the window once the session says
+  // the game's screen is up. SDL's window calls are the UI thread's to make.
+  void hide_for_game();
+  void after_play(const std::string& id);
   void fail(const std::string& id, const std::string& what, bool with_log);
   void save_report();
+
+  // How the session on the worker ended, set from its thread under mu. The
+  // exception itself cannot cross to this thread with its type, and which
+  // one it was decides what the launcher does next.
+  struct PlayEnd {
+    enum Kind { Played, Damaged, NeedsUnpack, Failed } kind = Failed;
+    std::string what;
+    session::Outcome out;
+  };
+  PlayEnd play_end;
+  std::atomic<bool> game_screen_up{false};
+  bool hidden = false;
 
   // ---- the bundle ---------------------------------------------------------
   player::DesktopPaths desktop_paths() const;

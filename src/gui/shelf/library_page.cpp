@@ -1,6 +1,7 @@
 // The Library screen: every disc in the library folders, and whether it can
 // be installed. The scan runs on the shelf's worker.
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -18,6 +19,7 @@
 #include "../../util/paths.h"
 #include "../../util/text.h"
 #include "../format.h"
+#include "../palette.h"
 #include "../widgets.h"
 #include "imgui.h"
 #include "pages.h"
@@ -30,70 +32,150 @@ namespace fs = std::filesystem;
 // appears here as a set missing its first disc, which is the honest answer
 // and more use than an install that fails a minute in.
 void LibraryPage::draw() {
-  PageWindow page("Library", "Esc back", ctx_.fonts.big);
+  set_page_trail("kretro \xe2\x80\xba library");
+  PageWindow page("Library", "Esc back", ctx_.fonts.big());
 
   config::Config cfg = config::load(config::config_file());
   std::vector<std::string> where = cfg.library_paths;
   if (where.empty()) where.push_back(install::iso_dir().string());
 
-  for (const std::string& w : where) ImGui::TextDisabled("  %s", w.c_str());
-  ImGui::Spacing();
+  // A column of a readable width down the middle of the page: the folders
+  // and what to do with them on a card, and the discs under it.
+  centre_column(content_max_w(Content::Reading));
+  step_heading("Library");
+  nav_section_begin("folders");
+  card_begin("folders", "folders");
+  for (const std::string& w : where) {
+    ImGui::TextColored(kCyan, "%s", elide(nullptr, w, ImGui::GetContentRegionAvail().x).c_str());
+  }
+  vgap(4);
 
   if (ctx_.job.running()) {
+    spinner();
+    ImGui::SameLine();
     ImGui::TextDisabled("scanning...");
+    card_end();
+    nav_section_end();
+    end_centre_column();
     return;
   }
-  if (ImGui::Button(scanned_ ? "Scan again" : "Scan")) {
-    scan_library(where);
-  }
+  // Before the first scan, scanning is the thing to do on this page, and the
+  // button says so. Either way the page opens on it.
+  const float bh = std::round(px(breakpoint() == Breakpoint::Compact ? 36 : 40));
+  const bool scan = scanned_ ? ghost_button("Scan again") : primary_button("Scan", ImVec2(0, bh));
+  default_focus();
+  if (scan) scan_library(where);
   ImGui::SameLine();
   // Import is reachable from the shelf, from here, and by dropping a pack on
   // the window. A pack somebody handed you is part of a collection, and this
   // is the screen where a collection is looked at; with nothing dropped yet
   // the page says so and asks for one.
-  if (ImGui::Button("Import...")) ctx_.go(Screen::Import);
+  if (ghost_button("Import...")) ctx_.go(Screen::Import);
   if (!drop_note_.empty()) {
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", drop_note_.c_str());
+    ImGui::TextDisabled("%s", elide(nullptr, drop_note_, ImGui::GetContentRegionAvail().x).c_str());
   }
-  ImGui::Spacing();
+  card_end();
+  nav_section_end();
 
   if (!scanned_) {
-    ImGui::TextWrapped(
+    section("discs");
+    empty_state(
         "Nothing scanned yet. Scanning reads every archive in those folders and "
         "works out what discs are inside; on a large collection that takes a "
         "minute or two.");
+    end_centre_column();
     return;
   }
 
-  if (ImGui::BeginTable("discs", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-    ImGui::TableSetupColumn("file");
+  section("discs");
+  // Names and titles take the room that is left and are cut short with an
+  // ellipsis; the label, the size and the verdict are as wide as they need,
+  // and what the database calls a disc gets more of the room than its file
+  // name, as it is where a warning is said. The table scrolls in a region of
+  // its own, so a long collection never runs off the bottom of the window,
+  // and the keys go through it as through the page.
+  nav_section_begin("discs");
+  begin_scroll("discs-scroll", ImVec2(0, 0));
+  const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit |
+                                ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_PadOuterX;
+  if (ImGui::BeginTable("discs", 5, flags)) {
+    ImGui::TableSetupColumn("file", ImGuiTableColumnFlags_WidthStretch, 0.8f);
     ImGui::TableSetupColumn("disc");
     ImGui::TableSetupColumn("size");
-    ImGui::TableSetupColumn("known as");
-    ImGui::TableSetupColumn("");
+    ImGui::TableSetupColumn("known as", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+    ImGui::TableSetupColumn("state");
+    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+    // The headings are labels, not places to stop: the arrows go from the
+    // buttons above straight to the rows.
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
     ImGui::TableHeadersRow();
-    for (const DiscRow& r : rows_) {
-      ImGui::TableNextRow();
+    ImGui::PopItemFlag();
+    ImGui::PopStyleColor();
+    const float size_w = ImGui::CalcTextSize("000.0 MB").x;
+    // Every row as tall as one with an Install button in it, with its text on
+    // that button's baseline, so the stripes are even and the columns read
+    // across on one line.
+    const float row_h = small_button_height();
+    for (size_t i = 0; i < rows_.size(); ++i) {
+      const DiscRow& r = rows_[i];
+      ImGui::TableNextRow(ImGuiTableRowFlags_None, row_h);
       ImGui::TableNextColumn();
-      ImGui::TextDisabled("%s", r.archive.c_str());
+      // The whole row is one stop for Up and Down, as a console's list is,
+      // and the Install button in it is Right from there. Pressing the row
+      // does what its Install button does, when it has one.
+      const bool ready = r.state == "ready" && !r.game_id.empty();
+      const float x = ImGui::GetCursorPosX();
+      ImGui::PushID(static_cast<int>(i));
+      const bool row = ImGui::Selectable("##row", false,
+                                         ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                                         ImVec2(0, row_h));
+      ImGui::PopID();
+      if (row && ready) wizard_.open_for(r.game_id);
+      // The row's first cell drawn over the start of it.
+      ImGui::SameLine(0, 0);
+      ImGui::SetCursorPosX(x);
+      align_to_small_button();
+      ImGui::TextDisabled("%s", elide(nullptr, r.archive, ImGui::GetContentRegionAvail().x).c_str());
       ImGui::TableNextColumn();
-      ImGui::Text("%s", r.label.empty() ? "-" : r.label.c_str());
+      align_to_small_button();
+      ImGui::TextColored(kCyan, "%s", r.label.empty() ? "-" : r.label.c_str());
       ImGui::TableNextColumn();
-      ImGui::TextDisabled("%s", human_size(r.bytes).c_str());
+      align_to_small_button();
+      // Right-aligned, so the sizes line up on their units.
+      const std::string size = human_size(r.bytes);
+      const float sw = ImGui::CalcTextSize(size.c_str()).x;
+      ImGui::Dummy(ImVec2(std::max(0.0f, size_w - sw), 0));
+      ImGui::SameLine(0, 0);
+      ImGui::TextUnformatted(size.c_str());
       ImGui::TableNextColumn();
-      ImGui::TextDisabled("%s", r.known_as.empty() ? "not in the database" : r.known_as.c_str());
+      align_to_small_button();
+      {
+        const std::string known = r.known_as.empty() ? "not in the database" : r.known_as;
+        // A title the database knows whose bytes differ is worth a second
+        // look, so it is said in the warning colour.
+        const bool odd = known.find("(bytes differ") != std::string::npos;
+        ImGui::TextColored(r.known_as.empty() ? kDim : (odd ? kWarm : kText), "%s",
+                           elide(nullptr, known, ImGui::GetContentRegionAvail().x).c_str());
+      }
       ImGui::TableNextColumn();
-      if (r.state == "ready" && !r.game_id.empty()) {
+      if (ready) {
         ImGui::PushID(r.game_id.c_str());
-        if (ImGui::SmallButton("Install")) wizard_.open_for(r.game_id);
+        if (small_button("Install")) wizard_.open_for(r.game_id);
         ImGui::PopID();
+      } else if (r.state == "installed") {
+        align_to_small_button();
+        badge(BadgeKind::Ok, "installed");
       } else {
+        align_to_small_button();
         ImGui::TextDisabled("%s", r.state.c_str());
       }
     }
     ImGui::EndTable();
   }
+  end_scroll();
+  nav_section_end();
+  end_centre_column();
 }
 
 void LibraryPage::scan_library(const std::vector<std::string>& where) {

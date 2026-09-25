@@ -4,11 +4,34 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
+#include "../../session/journal.h"
+#include "../focus.h"
 #include "../page.h"
 #include "context.h"
 
 namespace kg::gui::launcher {
+
+// A page's name as a part of the path the status bar shows, the way the page
+// chrome writes one it derives from a title: lower case, with a dash for
+// each run of anything else. The pages under a game or under the bundle's
+// settings set their path from it, "~/example-game/saves", so it reads as the
+// hierarchy it is.
+std::string path_part(const std::string& name);
+
+// The header of a page under a game or under the bundle's settings, which
+// says where it is rather than naming itself in large type (the page does
+// that at the head of its column): the bundle, the game when the player has
+// more than one, and `leaf`, "Example Collection › Example Game › saves".
+// Set before the page's PageWindow. Defined in settings_pages.cpp.
+void set_trail(const LauncherContext& ctx, const std::string& game, const char* leaf);
+
+// A paragraph in `colour`, wrapped to the page but no wider than `max_w`, set
+// a line at a time with a little room between the lines: ImGui's own wrapping
+// sets them solid, and in a paragraph of any length they nearly touch.
+// Defined in settings_pages.cpp.
+void spaced_text(const std::string& text, const ImVec4& colour, float max_w);
 
 // ---- first run (first_run.cpp) ----------------------------------------------
 
@@ -39,16 +62,22 @@ void desktop_modal(LauncherContext& ctx);
 
 // ---- the grid (grid_page.cpp) -----------------------------------------------
 
-// The bundle's banner, then one tile per game.
+// The focused game as a hero band under the bundle's banner, with Play, and
+// the bundle's games in a row under it (a grid when there are many).
 class GridPage : public Page {
  public:
   explicit GridPage(LauncherContext& ctx) : ctx_(ctx) {}
   void draw() override;
 
  private:
-  void banner();
-  void status_line();
+  void count_line();
   LauncherContext& ctx_;
+  // The game the band is about, the one it shows now, and the one it is
+  // cross-fading from.
+  std::string hero_id_, shown_id_, was_id_;
+  // That game's journal as last read, and when to read it again.
+  Refresh disk_;
+  std::vector<session::Record> journal_;
 };
 
 // ---- one game (game_page.cpp) -----------------------------------------------
@@ -62,6 +91,9 @@ class GamePage : public Page {
 
  private:
   LauncherContext& ctx_;
+  // The game's journal as last read, and when to read it again.
+  Refresh disk_;
+  std::vector<session::Record> journal_;
 };
 
 // Asking before unpacking a game on a machine with no FUSE.
@@ -78,6 +110,11 @@ class SavesPage : public Page {
  private:
   LauncherContext& ctx_;
   std::string export_path_, import_path_, restore_gen_;
+  // The game's snapshots and journal as last read, and when to read them
+  // again.
+  Refresh disk_;
+  std::vector<std::string> gens_;
+  std::vector<session::Record> recs_;
 };
 
 // ---- display and controls (settings_pages.cpp) ------------------------------
@@ -111,6 +148,10 @@ class BundlePage : public Page {
 
  private:
   LauncherContext& ctx_;
+  // Whether the applications-menu entry is there, as last looked, and when
+  // to look again.
+  Refresh disk_;
+  bool installed_ = false;
 };
 
 class LicensesPage : public Page {
@@ -131,7 +172,10 @@ class AboutPage : public Page {
 
  private:
   LauncherContext& ctx_;
-  std::string report_text_;
+  // The report as it stood when the page was first drawn, kept so that it is
+  // not read while a job could be writing it.
+  player::doctor::Report report_;
+  bool have_report_ = false;
 };
 
 // ---- working (working_modal.cpp) --------------------------------------------

@@ -13,6 +13,7 @@
 #include <system_error>
 
 #include "../../util/text.h"
+#include "../focus.h"
 #include "../job_modal.h"
 #include "imgui.h"
 
@@ -31,6 +32,9 @@ ShelfHost::ShelfHost(const rt::Env& e, const Window& w)
       timeline_(ctx_),
       bundles_(ctx_) {
   ctx_.go = [this](Screen s) { pages_.go(s); };
+  ctx_.nav = [this](char c) {
+    if (!is_busy()) shortcut(c);
+  };
   pages_.set(Screen::Shelf, shelf_);
   pages_.set(Screen::Game, game_);
   pages_.set(Screen::Create, wizard_);
@@ -62,6 +66,7 @@ void ShelfHost::start(const Startup& entry) {
 }
 
 void ShelfHost::frame() {
+  ctx_.hide_for_game();
   pages_.page().draw();
   if (ctx_.job.running()) modal();
 }
@@ -74,6 +79,10 @@ void ShelfHost::request_quit() {
     wizard_.ask_abandon();
     return;
   }
+  // A game still being got ready stops at its next step; the host joins the
+  // worker on the way out. One already playing is not stopped by this: it
+  // ends when its player quits it, as it did when play held this thread.
+  if (ctx_.playing()) ctx_.job.cancel();
   ctx_.quit = true;
 }
 
@@ -83,7 +92,7 @@ void ShelfHost::request_quit() {
 void ShelfHost::page_failed(const std::string& what) { ctx_.status = what; }
 
 // What the event loop hands on once it has done its own part: a dropped
-// file, Escape, Backspace and typing.
+// file, Escape and the pad's B, Backspace and typing.
 void ShelfHost::on_event(const SDL_Event& ev) {
   if (ev.type == SDL_DROPFILE) {
     std::string path = ev.drop.file ? ev.drop.file : "";
@@ -95,7 +104,10 @@ void ShelfHost::on_event(const SDL_Event& ev) {
       case SDLK_ESCAPE:
         // Escape reaches the shelf even while a job is running, because on
         // the wizard's install step it is the only way to abandon one.
-        // back() knows which screens may act on it and which may not.
+        // back() knows which screens may act on it and which may not. A
+        // modal answers Escape itself, and in a field it only leaves the
+        // field.
+        if (!back_allowed()) break;
         if (filtering()) clear_filter();
         else back();
         break;
@@ -105,34 +117,42 @@ void ShelfHost::on_event(const SDL_Event& ev) {
       default: break;
     }
   }
+  // The pad's B is Escape, but never quits: on the shelf itself it only
+  // clears the filter, as a console's library does nothing on B at its root.
+  if (ev.type == SDL_CONTROLLERBUTTONDOWN && ev.cbutton.button == SDL_CONTROLLER_BUTTON_B && back_allowed()) {
+    if (filtering()) clear_filter();
+    else if (!pages_.at(Screen::Shelf)) back();
+  }
   // Typing filters the shelf, the way dmenu does. Letters that are also
   // shortcuts only act as shortcuts when nothing is being typed.
   if (ev.type == SDL_TEXTINPUT && !is_busy()) {
-    struct Shortcut {
-      char lower, upper;
-      std::function<void()> act;
-    };
-    const Shortcut shortcuts[] = {
-        {'a', 'A', [this] { wizard_.create(); }},
-        {'i', 'I', [this] { pages_.go(Screen::Import); }},
-        {'d', 'D', [this] { pages_.go(Screen::Doctor); }},
-        {'l', 'L', [this] { pages_.go(Screen::Library); }},
-        {'s', 'S', [this] { pages_.go(Screen::Settings); }},
-        {'b', 'B', [this] { bundles_.open(); }},
-    };
     char c = ev.text.text[0];
-    bool shortcut = false;
-    if (pages_.at(Screen::Shelf) && !filtering()) {
-      for (const Shortcut& s : shortcuts) {
-        if (c == s.lower || c == s.upper) {
-          s.act();
-          shortcut = true;
-          break;
-        }
-      }
-    }
-    if (!shortcut) type(c);
+    const bool acted = pages_.at(Screen::Shelf) && !filtering() && shortcut(c);
+    if (!acted) type(c);
   }
+}
+
+// One list of the shelf's letters, for typing and for the sidebar alike.
+bool ShelfHost::shortcut(char c) {
+  struct Shortcut {
+    char lower, upper;
+    std::function<void()> act;
+  };
+  const Shortcut shortcuts[] = {
+      {'a', 'A', [this] { wizard_.create(); }},
+      {'i', 'I', [this] { pages_.go(Screen::Import); }},
+      {'d', 'D', [this] { pages_.go(Screen::Doctor); }},
+      {'l', 'L', [this] { pages_.go(Screen::Library); }},
+      {'s', 'S', [this] { pages_.go(Screen::Settings); }},
+      {'b', 'B', [this] { bundles_.open(); }},
+  };
+  for (const Shortcut& s : shortcuts) {
+    if (c == s.lower || c == s.upper) {
+      s.act();
+      return true;
+    }
+  }
+  return false;
 }
 
 void ShelfHost::back() {
@@ -179,21 +199,29 @@ void ShelfHost::type(char c) {
   if (!pages_.at(Screen::Shelf)) return;
   if (c == '\b') {
     if (!ctx_.filter.empty()) ctx_.filter.pop_back();
+  } else if (c == ' ' && ctx_.filter.empty()) {
+    // Space is also the key that opens the focused tile, so it only ever
+    // goes on the end of a filter already being typed.
+    return;
   } else if (c >= 32 && c < 127) ctx_.filter.push_back(c);
 }
 
 void ShelfHost::modal() {
   JobModalHooks hooks;
   hooks.footer_while_running = [this] {
+    // On the baseline of the stop button, which sits at the right of the
+    // dialog's band.
+    ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("working...");
     ImGui::SameLine();
-    if (ImGui::SmallButton("stop")) ctx_.job.cancel();
+    if (dialog_button("stop")) ctx_.job.cancel();
   };
+  hooks.on_finished_frame = [this] { ctx_.after_play(); };
   hooks.on_close = [this] {
     ctx_.job.join();
     ctx_.reload();
   };
-  draw_job_modal(ctx_.job, ctx_.fonts.big, hooks);
+  draw_job_modal(ctx_.job, ctx_.fonts.big(), hooks);
 }
 
 }  // namespace kg::gui::shelf

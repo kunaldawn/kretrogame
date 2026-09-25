@@ -21,9 +21,10 @@ constexpr Arity kOne{1, 1};
 constexpr Arity kTwo{2, 2};
 constexpr Arity kSome{1, SIZE_MAX};
 
-// In the order of the help, each row carrying its own lines of it. stage-probe
-// and bundle-build are hidden: the first is a test hook, the second the name
-// `bundle build` had while it was one, which scripts still use.
+// In the order of the help, each row carrying its own lines of it. stage-probe,
+// bundle-build and panel are hidden: the first is a test hook, the second the
+// name `bundle build` had while it was one, which scripts still use, and the
+// third is how the shelf measures the panel from another process.
 // clang-format off: each entry keeps its help text on lines of its own.
 constexpr Command kCommands[] = {
     {"create", Needs::GpuEnv, kNone, cmd_create,
@@ -39,6 +40,7 @@ constexpr Command kCommands[] = {
      "  kretro identify <iso>        what a disc image is\n"},
     {"key", Needs::Env, {1, 3}, cmd_key,
      "  kretro key <id> [serial]     show or store a game's serial\n"},
+    {"panel", Needs::Env, kNone, cmd_panel, ""},
     {"display", Needs::Env, kOne, cmd_display,
      "  kretro display <id>          where this game lands on this screen\n"},
     {"swap", Needs::Env, kTwo, cmd_swap,

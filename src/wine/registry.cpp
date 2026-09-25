@@ -406,7 +406,9 @@ void apply_fragment(const rt::Env& e, const fs::path& prefix, const std::string&
   }
   fs::path wine = rt::which(e, "wine");
   if (wine.empty()) throw std::runtime_error("registry: the runtime has no wine");
-  rt::Env we = e;
+  // No display: this runs before the game's compositor, and on the host's
+  // display regedit would flash up the prefix's virtual desktop.
+  rt::Env we = rt::offscreen(e);
   we.set("WINEPREFIX", prefix.string());
   ProcResult r = rt::run(we, wine, {"regedit", "/S", "C:\\.kretro-restore.reg"});
   std::error_code ec;

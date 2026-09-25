@@ -30,6 +30,13 @@ class Textures {
   // `key` names the picture in the cache; the bytes are decoded only the
   // first time it is asked for.
   const Texture* png(const std::string& key, const std::string& bytes);
+  // A blurred copy of a picture, for the backdrop behind a game's hero band:
+  // made once on the CPU (scaled down to at most 160 pixels wide, then three
+  // passes of a box blur), drawn stretched with linear filtering so it reads
+  // as soft light rather than as pixels. Kept under "backdrop:" and the
+  // picture's own key, so forget_matching drops it with the picture.
+  const Texture* backdrop_file(const std::filesystem::path& p);
+  const Texture* backdrop_png(const std::string& key, const std::string& bytes);
   // Drops every picture whose key contains `needle`, so a new screenshot of a
   // game is loaded rather than the one from before it was played.
   //
@@ -44,10 +51,23 @@ class Textures {
 
  private:
   const Texture* decoded(const std::string& key, const unsigned char* data, int len, bool from_file);
+  const Texture* blurred(const std::string& key, const std::string& source, const unsigned char* data, int len,
+                         bool from_file);
+  // A texture from RGBA pixels, kept under `key`; none when it would not be
+  // made.
+  const Texture* upload(const std::string& key, const unsigned char* rgba, int w, int h, bool linear);
   SDL_Renderer* ren_;
   std::map<std::string, Texture> cache_;
   // Dropped, and the ImGui frame they were dropped in.
   std::vector<std::pair<SDL_Texture*, int>> retired_;
 };
+
+// The pixels of a backdrop made from `rgba`, `w` by `h`: scaled down by a
+// whole factor, averaging each block, until it is at most `max_w` wide, then
+// blurred with three passes of a box blur of radius `radius` (which together
+// come close to a Gaussian). Its size is left in `out_w` and `out_h`. Empty
+// for an empty picture.
+std::vector<unsigned char> backdrop_pixels(const unsigned char* rgba, int w, int h, int max_w, int radius, int* out_w,
+                                           int* out_h);
 
 }  // namespace kg::gui

@@ -16,6 +16,7 @@
 #include "commands.h"
 #include "../../gpu/probe.h"
 #include "../../gui/launcher/launcher.h"
+#include "../../gui/screen.h"
 #include "../../player/cli.h"
 #include "../../player/player.h"
 #include "../../rt/env.h"
@@ -50,6 +51,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "%s: %s\n\n%s", name.c_str(), c.error.c_str(), player::usage(name).c_str());
     return 2;
   }
+
+  // Needs nothing of the bundle: it only asks SDL, with no window of its own.
+  if (c.kind == player::Command::Kind::Panel) return gui::panel_main();
 
   try {
     player::Bundle b = player::Bundle::open(self, env_nonempty("KRETRO_TOC") ? env_nonempty("KRETRO_TOC") : "");

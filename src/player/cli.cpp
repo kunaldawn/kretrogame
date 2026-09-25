@@ -28,6 +28,11 @@ Command parse_command(const std::vector<std::string>& a) {
     c.rest.assign(a.begin() + 1, a.end());
     return c;
   }
+  if (first == "panel") {
+    if (a.size() != 1) return error("panel takes nothing after it");
+    c.kind = Command::Kind::Panel;
+    return c;
+  }
   if (first == "--licenses" || first == "--licences") {
     if (a.size() != 1) return error("--licenses takes nothing after it");
     c.kind = Command::Kind::Licenses;

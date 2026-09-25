@@ -89,7 +89,7 @@ int cmd_uninstall(const rt::Env& /*e*/, std::vector<std::string>& a) {
 int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
   const std::string& id = a[0];
   const gui::PanelSize ps = gui::desktop_size(false);
-  uint32_t pw = ps.w, ph = ps.h;
+  const uint32_t pw = ps.w, ph = ps.h;
   fs::path pack = game_pack(id);
   std::error_code ec;
   if (!fs::exists(pack, ec)) {
@@ -99,12 +99,16 @@ int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
   Meta m = Pack::open(pack).meta();
   config::Config cfg = config::load(config::config_file());
   config::Display d = config::for_game(cfg, id);
-  config::Geometry g = config::compute_geometry(m.run.width, m.run.height, pw, ph, d);
+  config::Geometry g =
+      config::compute_geometry(m.run.width, m.run.height, {pw, ph, ps.usable_w, ps.usable_h}, d);
 
   std::printf("%s\n", m.name.c_str());
   std::printf("  the game renders at   %ux%u\n", g.logical_w, g.logical_h);
   if (pw && ph) std::printf("  this screen is        %ux%u\n", pw, ph);
   else std::printf("  this screen is        unknown (no display)\n");
+  // A window fits in what the desktop leaves free, so say when that is less.
+  if (pw && ph && (ps.usable_w != pw || ps.usable_h != ph))
+    std::printf("  its work area is      %ux%u\n", ps.usable_w, ps.usable_h);
   std::printf("  scaling               %s", config::name_of(d.mode));
   if (d.mode == config::ScaleMode::Integer && d.scale) std::printf(", asked for %ux", d.scale);
   std::printf("\n");
@@ -112,6 +116,10 @@ int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
               g.logical_h * g.scale, g.scale, g.fullscreen ? ", fullscreen" : "");
   return 0;
 }
+
+// Hidden: the shelf runs it to measure the panel while its own window holds
+// SDL's video under a driver that answers in the wrong units.
+int cmd_panel(const rt::Env& /*e*/, std::vector<std::string>& /*a*/) { return gui::panel_main(); }
 
 // Probes the GPU itself rather than asking the table to: the table's probe
 // would run before the argument count is checked.

@@ -312,6 +312,15 @@ Every entry in a player carries a BLAKE3 hash. Each game is verified the first
 time it is played. If one game is damaged, the player reports it and the other
 games remain playable.
 
+### Window and text size
+
+kretro's window and a player's launcher size their text and layout from the
+window's size and the screen's density, so they stay in proportion from a small
+handheld screen to a 4K monitor. **Ctrl +** and **Ctrl -** (or Ctrl and the
+mouse wheel) zoom on top of that, and **Ctrl 0** returns to the automatic size.
+Where the automatic size is wrong for a screen, `KRETRO_UI_SCALE` sets it
+outright, from 0.5 to 4 (for example `KRETRO_UI_SCALE=1.5 ./classics.run`).
+
 ## Graphics and display
 
 kretro selects a rendering path per game from the Direct3D or OpenGL libraries

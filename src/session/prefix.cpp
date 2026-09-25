@@ -45,7 +45,9 @@ void prepare_prefix(const rt::Env& e, const fs::path& prefix, const fs::path& ho
   fs::create_directories(home / ".config", ec);
   if (std::string moved = adopt_player_profile(prefix); !moved.empty()) say(moved);
 
-  rt::Env we = rt::wine_env(e, prefix, home);
+  // Every command here runs before the nested compositor exists, so none of
+  // them is given a display; see rt::offscreen.
+  rt::Env we = rt::offscreen(rt::wine_env(e, prefix, home));
   if (!m.runtime.dlloverrides.empty()) we.set("WINEDLLOVERRIDES", m.runtime.dlloverrides);
 
   // A prefix that has never been initialised takes about a minute, and done

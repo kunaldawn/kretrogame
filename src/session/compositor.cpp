@@ -1,10 +1,12 @@
 #include "compositor.h"
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -76,12 +78,44 @@ struct Weston {
   std::string socket;
 };
 
+// The name of the Wayland socket for this session: kretro-<suffix>, or the
+// first of kretro-<suffix>-2, -3 ... that no live compositor has.
+//
+// libwayland holds an flock on <socket>.lock for as long as the compositor
+// that made the socket lives, so a lock nobody holds is a socket left by a
+// Weston that was killed. That one is removed: left there, we would see the
+// socket, believe our compositor is up, and then watch Xwayland fail to
+// connect to a dead endpoint. A held lock is another session's live screen -
+// the same game played from another state directory, or a player and kretro
+// side by side - and removing its socket took that session's display away
+// from everything that looks it up by name.
+std::string free_socket_name(const fs::path& base, const std::string& suffix) {
+  std::error_code ec;
+  const std::string stem = "kretro-" + suffix;
+  for (int n = 1; n < 100; ++n) {
+    const std::string name = n == 1 ? stem : stem + "-" + std::to_string(n);
+    const fs::path lock = base / (name + ".lock");
+    const int fd = open(lock.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      const bool live = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+      close(fd);
+      if (live) continue;
+    }
+    fs::remove(base / name, ec);
+    fs::remove(lock, ec);
+    return name;
+  }
+  throw std::runtime_error("no free Wayland socket name for " + stem);
+}
+
 Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorOptions& opt,
                     uint32_t w, uint32_t h, uint32_t s,
                     const std::function<void(const std::string&)>& say) {
   std::error_code ec;
   const fs::path& home = opt.home;
-  std::string socket = "kretro-" + opt.socket_suffix;
+  const char* xdg = env_nonempty("XDG_RUNTIME_DIR");
+  const fs::path run_dir = xdg ? fs::path(xdg) : fs::path("/tmp");
+  const std::string socket = free_socket_name(run_dir, opt.socket_suffix);
   std::vector<std::string> wargs;
   // Weston runs as an ordinary client of whatever the host has, which is what
   // keeps this on the well-trodden path on both Wayland and X11 hosts - unless
@@ -117,15 +151,6 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
   if (weston.empty()) throw std::runtime_error("no weston in this runtime");
   fs::path weston_log = home / "weston.log";
   fs::remove(weston_log, ec);
-  // A Weston that was killed rather than shut down leaves its socket behind.
-  // Left there, we would see the socket, believe the compositor is up, and
-  // then watch Xwayland fail to connect to a dead endpoint.
-  {
-    const char* xr = env_nonempty("XDG_RUNTIME_DIR");
-    fs::path base = xr ? fs::path(xr) : fs::path("/tmp");
-    fs::remove(base / socket, ec);
-    fs::remove(base / (socket + ".lock"), ec);
-  }
   rt::Env wenv = wine_env;
   wenv.set("WESTON_CONFIG_FILE", (home / ".config" / "weston.ini").string());
 
@@ -140,8 +165,7 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
 
   ScopedChild child(wpid, SIGTERM, false);
 
-  const char* xdg = env_nonempty("XDG_RUNTIME_DIR");
-  fs::path sock = fs::path(xdg ? xdg : "/tmp") / socket;
+  const fs::path sock = run_dir / socket;
   // The socket appearing is necessary but not sufficient: check the process is
   // still alive, so a compositor that started and immediately died is reported
   // as such rather than as a puzzling failure two steps later.

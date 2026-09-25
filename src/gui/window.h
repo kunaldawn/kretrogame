@@ -10,24 +10,19 @@
 
 #include "../rt/env.h"
 #include "imgui.h"
+#include "scale.h"
 
 namespace kg::gui {
 
-// The two sizes of type a page draws in: body text, and titles.
-struct Fonts {
-  ImFont* body = nullptr;
-  ImFont* big = nullptr;
-};
-
-// The window both programs draw in.
+// The window both programs draw in. Its fonts are not kept here: they are
+// rebuilt whenever the scale changes, so a page asks for them through the
+// handle fonts() returns (scale.h) at the moment it draws.
 struct Window {
   SDL_Window* win = nullptr;
   SDL_Renderer* ren = nullptr;
-  ImFont* body = nullptr;
-  ImFont* big = nullptr;
 
   // The fonts open_window loaded, for a page that takes them together.
-  Fonts fonts() const { return Fonts{body, big}; }
+  Fonts fonts() const { return Fonts{}; }
 };
 
 struct WindowSpec {
@@ -44,6 +39,8 @@ struct WindowSpec {
 // and the runtime's fonts, and every gamepad already plugged in. Empty, with
 // `why` set, when there is no window to be had.
 std::optional<Window> open_window(const rt::Env& e, const WindowSpec& spec, std::string* why);
+// Works out the scale for the window as it is now and, when it has changed,
+// rebuilds the fonts and the style for it before the frame begins.
 void begin_frame(const Window& w);
 void end_frame(const Window& w);
 // ImGui first, then SDL: the reverse of how they were opened.

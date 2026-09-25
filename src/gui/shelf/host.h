@@ -37,6 +37,9 @@ class ShelfHost : public Host {
   void back();
   void dropped(const std::string& path);
   void type(char c);
+  // The letter's action, when `c` is one of the shelf's letters (either
+  // case), and whether it was.
+  bool shortcut(char c);
   void clear_filter() { ctx_.filter.clear(); }
   bool filtering() const { return !ctx_.filter.empty(); }
   // One test for both, because the shelf's jobs and the wizard's share the

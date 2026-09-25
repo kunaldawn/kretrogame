@@ -64,7 +64,10 @@ void apply_backend(const rt::Env& e, rt::Env& we, const fs::path& prefix,
     // drive, which a player's prefix does not have.
     fs::path reg = prefix / "drive_c" / "kretro-backend.reg";
     std::ofstream(reg) << backend::registry_file(s.registry);
-    ProcResult r = rt::run(we, rt::find_wine(e.root), {"regedit", "/S", "C:\\kretro-backend.reg"});
+    // A copy with no display: `we` itself goes on to be the game's and the
+    // compositor's environment, and needs the host's.
+    ProcResult r =
+        rt::run(rt::offscreen(we), rt::find_wine(e.root), {"regedit", "/S", "C:\\kretro-backend.reg"});
     if (!r.ok()) log_line("warning: the " + name + " settings could not be written to the registry");
   }
 }

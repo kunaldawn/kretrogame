@@ -163,6 +163,52 @@ static void test_geometry_unknown_panel() {
   CHECK(!g.fullscreen);
 }
 
+// This host's panel under a Wayland desktop at 125%: 3072x1728 logical, and a
+// work area of 3017x1696 once the top bar and a fixed dock are taken off.
+static void test_geometry_work_area() {
+  const config::Panel panel{3072, 1728, 3017, 1696};
+  config::Display d;
+  d.mode = config::ScaleMode::Integer;
+  d.scale = 0;
+  // 1024x768 fits twice in the work area, and 2048x1536 is inside it.
+  config::Geometry g = config::compute_geometry(1024, 768, panel, d);
+  CHECK_EQ(g.scale, 2u);
+  CHECK(!g.fullscreen);
+
+  // 640x480: the whole panel would take 3 (1728/480 = 3.6), the work area
+  // too (1696/480 = 3.53); a panel whose work area is short of 1440 lines
+  // takes it down to 2.
+  CHECK_EQ(config::compute_geometry(640, 480, panel, d).scale, 3u);
+  CHECK_EQ(config::compute_geometry(640, 480, config::Panel{1920, 1440, 1920, 1400}, d).scale, 2u);
+  CHECK_EQ(config::compute_geometry(640, 480, 1920, 1440, d).scale, 3u);
+
+  // An explicit 4 is clamped to what the work area shows, not the panel.
+  d.scale = 4;
+  CHECK_EQ(config::compute_geometry(1024, 768, panel, d).scale, 2u);
+  d.scale = 1;
+  CHECK_EQ(config::compute_geometry(1024, 768, panel, d).scale, 1u);
+
+  // A work area of zero is the whole panel.
+  d.scale = 0;
+  CHECK_EQ(config::compute_geometry(640, 480, config::Panel{1920, 1440, 0, 0}, d).scale, 3u);
+
+  // Fullscreen has the whole panel: Fit and Native ignore the work area.
+  d.mode = config::ScaleMode::Fit;
+  g = config::compute_geometry(640, 480, config::Panel{1920, 1440, 1920, 1400}, d);
+  CHECK_EQ(g.scale, 3u);
+  CHECK(g.fullscreen);
+  d.mode = config::ScaleMode::Native;
+  g = config::compute_geometry(1024, 768, panel, d);
+  CHECK_EQ(g.logical_w, 3072u);
+  CHECK_EQ(g.logical_h, 1728u);
+  CHECK(g.fullscreen && g.desktop_is_panel);
+
+  // The panel as X saw it under native Xwayland scaling, which gave 4x and a
+  // window twice the size of the screen. Kept to show what the units were.
+  d.mode = config::ScaleMode::Integer;
+  CHECK_EQ(config::compute_geometry(1024, 768, 6144, 3456, d).scale, 4u);
+}
+
 // The exact text config::save writes, pinned so that moving the code that
 // writes it can be shown to change nothing in a settings file already on disk.
 static void test_golden_save(const fs::path& tmp) {
@@ -320,6 +366,7 @@ int main() {
     test_geometry_fit();
     test_geometry_native();
     test_geometry_unknown_panel();
+    test_geometry_work_area();
     test_text_helpers();
     test_formatters();
     test_case_insensitive_paths(tmp);

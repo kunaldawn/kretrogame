@@ -1,5 +1,6 @@
-// A plain list over std::filesystem, drawn inside a page: where it is looking,
-// "..", the folders in it and the files it offers.
+// A plain list over std::filesystem, drawn inside a page as a terminal lists a
+// directory: where it is looking, "..", the folders in it and the files it
+// offers with their sizes.
 //
 // There is no file dialog in kretro and there should not be one: a dialog is
 // another toolkit, another theme, and nothing a gamepad can drive. The Import
@@ -13,7 +14,8 @@
 namespace kg::gui {
 
 struct FileListSpec {
-  // The child window's ID, and its height.
+  // The child window's ID, and its height in design pixels: file_list
+  // applies px() itself, so a caller writes 260 and not px(260).
   const char* child_id = "";
   float height = 0;
   // Leave out every entry whose name starts with a dot.
