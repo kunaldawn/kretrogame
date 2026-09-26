@@ -1,0 +1,526 @@
+wayland backend: capture the host pointer on a click, and give every
+absolute motion its relative step
+
+kretro runs a game in a rootful Xwayland inside this nested Weston. When
+a game warps the X pointer, Xwayland locks the nested pointer and from
+then on moves the X pointer by relative motion only. The stock backend
+passes on absolute motion alone, so the locked pointer never moved again.
+
+1. Every absolute motion now also carries the step from the previous one
+   (WESTON_POINTER_MOTION_ABS | REL), so a locked nested pointer moves.
+
+2. With KRETRO_WESTON_CAPTURE=1, a click in the window locks the host
+   pointer (zwp_pointer_constraints_v1, one-shot) and the nested pointer
+   is driven by the host's zwp_relative_pointer_v1 from then on, divided
+   by the output scale. The nested compositor clamps that to its output,
+   which is what keeps the pointer inside the game. The capturing click
+   is not passed on. Ctrl+Alt pressed and released with nothing else in
+   between releases the lock, with a cursor position hint where the
+   relative motion took the pointer since the capture (added up here and
+   clamped to the output, because the nested pointer stays at the warp
+   point while Xwayland holds its own lock); so does the host ending the
+   lock (focus loss) or the keyboard leaving. The next click captures
+   again. While captured the title says how to get out, including after
+   a frame is made again on the way out of fullscreen.
+
+--- a/libweston/backend-wayland/meson.build
++++ b/libweston/backend-wayland/meson.build
+@@ -10,6 +10,10 @@
+ 	fullscreen_shell_unstable_v1_protocol_c,
+ 	presentation_time_protocol_c,
+ 	presentation_time_server_protocol_h,
++	pointer_constraints_unstable_v1_client_protocol_h,
++	pointer_constraints_unstable_v1_protocol_c,
++	relative_pointer_unstable_v1_client_protocol_h,
++	relative_pointer_unstable_v1_protocol_c,
+ 	xdg_shell_client_protocol_h,
+ 	xdg_shell_protocol_c,
+ ]
+--- a/libweston/backend-wayland/wayland.c
++++ b/libweston/backend-wayland/wayland.c
+@@ -60,6 +60,8 @@
+ #include "shared/xalloc.h"
+ #include "fullscreen-shell-unstable-v1-client-protocol.h"
+ #include "xdg-shell-client-protocol.h"
++#include "relative-pointer-unstable-v1-client-protocol.h"
++#include "pointer-constraints-unstable-v1-client-protocol.h"
+ #include "presentation-time-server-protocol.h"
+ #include "linux-dmabuf.h"
+ #include <libweston/pixel-formats.h>
+@@ -88,6 +90,8 @@
+ 		struct xdg_wm_base *xdg_wm_base;
+ 		struct zwp_fullscreen_shell_v1 *fshell;
+ 		struct wl_shm *shm;
++		struct zwp_relative_pointer_manager_v1 *relative_pointer_manager;
++		struct zwp_pointer_constraints_v1 *pointer_constraints;
+ 
+ 		struct wl_list output_list;
+ 
+@@ -98,6 +102,12 @@
+ 	bool sprawl_across_outputs;
+ 	bool fullscreen;
+ 
++	/* KRETRO_WESTON_CAPTURE=1: a click in the window locks the host
++	 * pointer and the nested pointer is driven by relative motion from
++	 * then on, so it cannot leave the window. Ctrl+Alt, or the host
++	 * taking the lock away, lets it go again. */
++	bool capture_on_click;
++
+ 	struct theme *theme;
+ 	cairo_device_t *frame_device;
+ 	struct wl_cursor_theme *cursor_theme;
+@@ -229,6 +239,29 @@
+ 
+ 	struct weston_pointer_axis_event vert, horiz;
+ 
++	/* The last absolute position passed on, so that every absolute
++	 * motion also carries the relative step from it. A client that
++	 * locked the nested pointer (Xwayland does, to emulate a warp)
++	 * gets only relative motion, and without the step it would never
++	 * see the pointer move. */
++	bool have_last_pos;
++	struct weston_coord_global last_pos;
++
++	struct {
++		struct zwp_relative_pointer_v1 *relative_pointer;
++		struct zwp_locked_pointer_v1 *locked_pointer;
++		bool locked;		/* the host has granted the lock */
++		uint32_t swallow_button;	/* the click that captured */
++		bool ctrl, alt;		/* held on the host keyboard */
++		bool chord;		/* both have been down together */
++		bool spoiled;		/* ...but something else happened too */
++		/* Where the relative motion has taken the pointer since
++		 * the capture, clamped to the output. The nested pointer
++		 * is no guide to that: while Xwayland holds its own lock
++		 * to emulate a warp, it stays at the warp point. */
++		struct weston_coord_global pos;
++	} capture;
++
+ 	bool seat_initialized;
+ 	struct wl_callback *initial_info_cb;
+ 	char *name;
+@@ -867,6 +900,9 @@
+ 	wayland_output_destroy_shm_buffers(output);
+ }
+ 
++static void
++output_refresh_capture_title(struct wayland_output *output);
++
+ static int
+ wayland_output_set_windowed(struct wayland_output *output)
+ {
+@@ -887,6 +923,7 @@
+ 
+ 	if (output->keyboard_count)
+ 		frame_set_flag(output->frame, FRAME_FLAG_ACTIVE);
++	output_refresh_capture_title(output);
+ 
+ 	wayland_output_resize_surface(output);
+ 
+@@ -1636,6 +1673,209 @@
+ 
+ /* Events received from the wayland-server this compositor is client of: */
+ 
++static void
++output_show_capture(struct wayland_output *output, bool captured)
++{
++	char *title = NULL;
++
++	if (!output || !output->title)
++		return;
++
++	if (captured &&
++	    asprintf(&title, "%s - Ctrl+Alt releases the mouse",
++		     output->title) < 0)
++		title = NULL;
++
++	if (output->parent.xdg_toplevel)
++		xdg_toplevel_set_title(output->parent.xdg_toplevel,
++				       title ? title : output->title);
++	if (output->frame) {
++		frame_set_title(output->frame, title ? title : output->title);
++		weston_output_schedule_repaint(&output->base);
++	}
++	free(title);
++}
++
++/* Puts the capture hint back into a title that was just made again: a
++ * frame created on the way back from fullscreen starts from the plain
++ * title. */
++static void
++output_refresh_capture_title(struct wayland_output *output)
++{
++	struct wayland_input *input;
++
++	wl_list_for_each(input, &output->backend->input_list, link) {
++		if (input->output == output && input->capture.locked) {
++			output_show_capture(output, true);
++			return;
++		}
++	}
++}
++
++/* Lets the host pointer go. With `hint`, the host is asked to put its
++ * cursor where the captured pointer got to, so that the pointer does not
++ * jump back to where it was when it was captured. */
++static void
++input_release_capture(struct wayland_input *input, bool hint)
++{
++	struct wayland_output *output = input->output;
++	struct weston_coord c;
++	int32_t fx = 0, fy = 0;
++
++	if (!input->capture.locked_pointer)
++		return;
++
++	if (hint && input->capture.locked && output) {
++		c = weston_matrix_transform_coord(&output->base.matrix,
++						  input->capture.pos.c);
++		if (output->frame)
++			frame_interior(output->frame, &fx, &fy, NULL, NULL);
++		zwp_locked_pointer_v1_set_cursor_position_hint(
++			input->capture.locked_pointer,
++			wl_fixed_from_double(c.x + fx),
++			wl_fixed_from_double(c.y + fy));
++		wl_surface_commit(output->parent.surface);
++	}
++
++	zwp_locked_pointer_v1_destroy(input->capture.locked_pointer);
++	input->capture.locked_pointer = NULL;
++	input->capture.locked = false;
++	input->have_last_pos = false;
++	output_show_capture(output, false);
++}
++
++static void
++locked_pointer_locked(void *data,
++		      struct zwp_locked_pointer_v1 *locked_pointer)
++{
++	struct wayland_input *input = data;
++
++	input->capture.locked = true;
++	output_show_capture(input->output, true);
++}
++
++/* The host ended the lock itself: another window took the focus, or
++ * the lock was refused. A one-shot lock is dead once this arrives, and
++ * the next click in the window captures again. */
++static void
++locked_pointer_unlocked(void *data,
++			struct zwp_locked_pointer_v1 *locked_pointer)
++{
++	struct wayland_input *input = data;
++
++	input_release_capture(input, false);
++}
++
++static const struct zwp_locked_pointer_v1_listener locked_pointer_listener = {
++	locked_pointer_locked,
++	locked_pointer_unlocked,
++};
++
++static bool
++input_try_capture(struct wayland_input *input)
++{
++	struct wayland_backend *b = input->backend;
++	struct wayland_output *output = input->output;
++	struct weston_pointer *pointer = weston_seat_get_pointer(&input->base);
++
++	if (!b->capture_on_click || !b->parent.pointer_constraints ||
++	    !input->capture.relative_pointer ||
++	    input->capture.locked_pointer || !output ||
++	    input->keyboard_focus != output)
++		return false;
++
++	input->capture.locked_pointer =
++		zwp_pointer_constraints_v1_lock_pointer(
++			b->parent.pointer_constraints,
++			output->parent.surface,
++			input->parent.pointer, NULL,
++			ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
++	if (!input->capture.locked_pointer)
++		return false;
++	zwp_locked_pointer_v1_add_listener(input->capture.locked_pointer,
++					   &locked_pointer_listener, input);
++	wl_surface_commit(output->parent.surface);
++
++	/* The click's own position, where the host cursor is. */
++	if (input->have_last_pos)
++		input->capture.pos = input->last_pos;
++	else if (pointer)
++		input->capture.pos = pointer->pos;
++	else
++		input->capture.pos = output->base.pos;
++	return true;
++}
++
++/* While the host pointer is locked, this is the only motion there is.
++ * It is in the host surface's pixels, which are the nested output's
++ * device pixels, so it is divided by the output scale; the nested
++ * compositor clamps the result to its outputs, which is what keeps the
++ * pointer inside the game's screen. */
++static void
++relative_pointer_handle_motion(void *data,
++			       struct zwp_relative_pointer_v1 *relative_pointer,
++			       uint32_t utime_hi, uint32_t utime_lo,
++			       wl_fixed_t dx, wl_fixed_t dy,
++			       wl_fixed_t dx_unaccel, wl_fixed_t dy_unaccel)
++{
++	struct wayland_input *input = data;
++	struct weston_pointer_motion_event event = { 0 };
++	struct timespec ts;
++	double scale;
++
++	if (!input->capture.locked || !input->output || !input->has_focus)
++		return;
++
++	scale = input->output->base.current_scale;
++	if (scale < 1)
++		scale = 1;
++
++	timespec_from_usec(&ts, ((uint64_t) utime_hi << 32) | utime_lo);
++	event.mask = WESTON_POINTER_MOTION_REL |
++		     WESTON_POINTER_MOTION_REL_UNACCEL;
++	event.time = ts;
++	event.rel = weston_coord(wl_fixed_to_double(dx) / scale,
++				 wl_fixed_to_double(dy) / scale);
++	event.rel_unaccel = weston_coord(wl_fixed_to_double(dx_unaccel) / scale,
++					 wl_fixed_to_double(dy_unaccel) / scale);
++	input->capture.pos.c = weston_coord_add(input->capture.pos.c,
++						event.rel);
++	input->capture.pos =
++		weston_coord_global_clamp_for_output(input->capture.pos,
++						     &input->output->base);
++	notify_motion(&input->base, &ts, &event);
++
++	if (input->seat_version < WL_POINTER_FRAME_SINCE_VERSION)
++		notify_pointer_frame(&input->base);
++}
++
++static const struct zwp_relative_pointer_v1_listener relative_pointer_listener = {
++	relative_pointer_handle_motion,
++};
++
++/* Ctrl+Alt, pressed and let go with nothing else in between, is the
++ * release: what virtual machine viewers use, so it is the chord people
++ * already try. It is watched here rather than bound in the compositor,
++ * because the game has to go on seeing Ctrl and Alt for its own keys. */
++static void
++input_track_chord(struct wayland_input *input, bool ctrl, bool alt,
++		  bool others)
++{
++	if (others)
++		input->capture.spoiled = true;
++	if (ctrl && alt)
++		input->capture.chord = true;
++
++	if (!ctrl && !alt && !others) {
++		if (input->capture.chord && !input->capture.spoiled)
++			input_release_capture(input, true);
++		input->capture.chord = false;
++		input->capture.spoiled = false;
++	}
++	input->capture.ctrl = ctrl;
++	input->capture.alt = alt;
++}
++
+ /* parent input interface */
+ static void
+ input_set_cursor(struct wayland_input *input)
+@@ -1709,8 +1949,11 @@
+ 		notify_pointer_focus(&input->base, &input->output->base, pos);
+ 		wl_pointer_set_cursor(input->parent.pointer,
+ 				      input->enter_serial, NULL, 0, 0);
++		input->last_pos = pos;
++		input->have_last_pos = true;
+ 	} else {
+ 		input->has_focus = false;
++		input->have_last_pos = false;
+ 		clear_pointer_focus(&input->base);
+ 		input_set_cursor(input);
+ 	}
+@@ -1732,9 +1975,11 @@
+ 			weston_output_schedule_repaint(&input->output->base);
+ 	}
+ 
++	input_release_capture(input, false);
+ 	clear_pointer_focus(&input->base);
+ 	input->output = NULL;
+ 	input->has_focus = false;
++	input->have_last_pos = false;
+ }
+ 
+ static void
+@@ -1747,11 +1992,16 @@
+ 	bool want_frame = false;
+ 	double x, y;
+ 	struct weston_coord_global pos;
++	struct weston_pointer_motion_event event = { 0 };
+ 	struct timespec ts;
+ 
+ 	if (!input->output)
+ 		return;
+ 
++	/* A locked host pointer moves by relative motion alone. */
++	if (input->capture.locked)
++		return;
++
+ 	x = wl_fixed_to_double(fixed_x);
+ 	y = wl_fixed_to_double(fixed_y);
+ 
+@@ -1787,8 +2037,19 @@
+ 
+ 	if (location == THEME_LOCATION_CLIENT_AREA) {
+ 		timespec_from_msec(&ts, time);
+-		notify_motion_absolute(&input->base, &ts, pos);
++		event.mask = WESTON_POINTER_MOTION_ABS;
++		event.time = ts;
++		event.abs = pos;
++		if (input->have_last_pos) {
++			event.mask |= WESTON_POINTER_MOTION_REL;
++			event.rel = weston_coord_sub(pos.c, input->last_pos.c);
++		}
++		input->last_pos = pos;
++		input->have_last_pos = true;
++		notify_motion(&input->base, &ts, &event);
+ 		want_frame = true;
++	} else {
++		input->have_last_pos = false;
+ 	}
+ 
+ 	if (want_frame && input->seat_version < WL_POINTER_FRAME_SINCE_VERSION)
+@@ -1844,6 +2105,26 @@
+ 		location = THEME_LOCATION_CLIENT_AREA;
+ 	}
+ 
++	if (state == WL_POINTER_BUTTON_STATE_PRESSED &&
++	    (input->capture.ctrl || input->capture.alt))
++		input->capture.spoiled = true;
++
++	/* The click that captures the pointer is the capture and nothing
++	 * else, as in a virtual machine: the game does not see it, nor its
++	 * release. */
++	if (location == THEME_LOCATION_CLIENT_AREA &&
++	    state == WL_POINTER_BUTTON_STATE_PRESSED &&
++	    !input->capture.swallow_button &&
++	    input_try_capture(input)) {
++		input->capture.swallow_button = button;
++		return;
++	}
++	if (state == WL_POINTER_BUTTON_STATE_RELEASED &&
++	    button == input->capture.swallow_button) {
++		input->capture.swallow_button = 0;
++		return;
++	}
++
+ 	if (location == THEME_LOCATION_CLIENT_AREA) {
+ 		timespec_from_msec(&ts, time);
+ 		notify_button(&input->base, &ts, button, state);
+@@ -2052,6 +2333,9 @@
+ 	struct wayland_input *input = data;
+ 	struct wayland_output *focus;
+ 
++	input_release_capture(input, false);
++	input->capture.chord = false;
++	input->capture.spoiled = false;
+ 	notify_keyboard_focus_out(&input->base);
+ 
+ 	focus = input->keyboard_focus;
+@@ -2080,6 +2364,11 @@
+ 
+ 	timespec_from_msec(&ts, time);
+ 
++	if (state && key != KEY_LEFTCTRL && key != KEY_RIGHTCTRL &&
++	    key != KEY_LEFTALT && key != KEY_RIGHTALT &&
++	    (input->capture.ctrl || input->capture.alt))
++		input->capture.spoiled = true;
++
+ 	input->key_serial = serial;
+ 	notify_key(&input->base, &ts, key,
+ 		   state ? WL_KEYBOARD_KEY_STATE_PRESSED :
+@@ -2111,6 +2400,15 @@
+ 			      mods_depressed, mods_latched,
+ 			      mods_locked, 0, 0, group);
+ 	notify_modifiers(&input->base, serial_out);
++
++	{
++		uint32_t ctrl = 1u << keyboard->xkb_info->ctrl_mod;
++		uint32_t alt = 1u << keyboard->xkb_info->alt_mod;
++
++		input_track_chord(input, mods_depressed & ctrl,
++				  mods_depressed & alt,
++				  mods_depressed & ~(ctrl | alt));
++	}
+ }
+ 
+ static void
+@@ -2318,7 +2616,21 @@
+ 		wl_pointer_add_listener(input->parent.pointer,
+ 					&pointer_listener, input);
+ 		weston_seat_init_pointer(&input->base);
++		if (input->backend->parent.relative_pointer_manager) {
++			input->capture.relative_pointer =
++				zwp_relative_pointer_manager_v1_get_relative_pointer(
++					input->backend->parent.relative_pointer_manager,
++					input->parent.pointer);
++			zwp_relative_pointer_v1_add_listener(
++				input->capture.relative_pointer,
++				&relative_pointer_listener, input);
++		}
+ 	} else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && input->parent.pointer) {
++		input_release_capture(input, false);
++		if (input->capture.relative_pointer) {
++			zwp_relative_pointer_v1_destroy(input->capture.relative_pointer);
++			input->capture.relative_pointer = NULL;
++		}
+ 		if (input->seat_version >= WL_POINTER_RELEASE_SINCE_VERSION)
+ 			wl_pointer_release(input->parent.pointer);
+ 		else
+@@ -2466,6 +2778,10 @@
+ 		else
+ 			wl_keyboard_destroy(input->parent.keyboard);
+ 	}
++	if (input->capture.locked_pointer)
++		zwp_locked_pointer_v1_destroy(input->capture.locked_pointer);
++	if (input->capture.relative_pointer)
++		zwp_relative_pointer_v1_destroy(input->capture.relative_pointer);
+ 	if (input->parent.pointer) {
+ 		if (input->seat_version >= WL_POINTER_RELEASE_SINCE_VERSION)
+ 			wl_pointer_release(input->parent.pointer);
+@@ -2701,6 +3017,14 @@
+ 	} else if (strcmp(interface, "wl_shm") == 0) {
+ 		b->parent.shm =
+ 			wl_registry_bind(registry, name, &wl_shm_interface, 1);
++	} else if (strcmp(interface, "zwp_relative_pointer_manager_v1") == 0) {
++		b->parent.relative_pointer_manager =
++			wl_registry_bind(registry, name,
++					 &zwp_relative_pointer_manager_v1_interface, 1);
++	} else if (strcmp(interface, "zwp_pointer_constraints_v1") == 0) {
++		b->parent.pointer_constraints =
++			wl_registry_bind(registry, name,
++					 &zwp_pointer_constraints_v1_interface, 1);
+ 	}
+ }
+ 
+@@ -2794,6 +3118,12 @@
+ 	if (b->parent.fshell)
+ 		zwp_fullscreen_shell_v1_release(b->parent.fshell);
+ 
++	if (b->parent.relative_pointer_manager)
++		zwp_relative_pointer_manager_v1_destroy(b->parent.relative_pointer_manager);
++
++	if (b->parent.pointer_constraints)
++		zwp_pointer_constraints_v1_destroy(b->parent.pointer_constraints);
++
+ 	if (b->parent.compositor)
+ 		wl_compositor_destroy(b->parent.compositor);
+ 
+@@ -2913,6 +3243,8 @@
+ 	create_cursor(b, new_config);
+ 
+ 	b->fullscreen = new_config->fullscreen;
++	b->capture_on_click = getenv("KRETRO_WESTON_CAPTURE") &&
++			      strcmp(getenv("KRETRO_WESTON_CAPTURE"), "1") == 0;
+ 
+ 	b->formats_count = ARRAY_LENGTH(wayland_formats);
+ 	b->formats = pixel_format_get_array(wayland_formats, b->formats_count);

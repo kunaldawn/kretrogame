@@ -7,6 +7,8 @@
 // function and tested as such; the files it makes are made under a temporary
 // directory and read back.
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -35,7 +37,9 @@
 #include "player/state_dir.h"
 #include "player/unpack.h"
 #include "player/verify_memo.h"
+#include "session/compositor.h"
 #include "session/input_helper.h"
+#include "session/internal.h"
 #include "session/prefix.h"
 #include "util/paths.h"
 #include "util/proc.h"
@@ -1222,6 +1226,57 @@ static void test_run_timeout_covers_the_read() {
   CHECK(contains(r.out, "quick"));
 }
 
+static void test_run_reads_what_is_left_in_the_pipe() {
+  section("proc: what a program wrote before it exited is all read, however long that takes");
+  // The last of a program's output is still in the pipe when it exits, and
+  // the grace for what it left running used to cut that short too: 7z -so
+  // piped into a hash, on a busy machine, was a short read reported as ok.
+  const std::string cmd = "head -c 6000000 /dev/zero | tr '\\0' x";
+  ProcResult r = kg::run({"/bin/sh", "-c", cmd});
+  CHECK(r.ok());
+  CHECK_EQ(r.out.size(), size_t(6000000));
+  // With no grace at all, which is as late as a busy machine gets there,
+  // and from a program that leaves a whole megabyte in the pipe as it exits.
+  ProcOptions po;
+  po.grace_ms = 0;
+  for (int i = 0; i < 5; ++i) {
+    r = kg::run({"/proc/self/exe", "--write-and-exit", "6000000"}, po);
+    CHECK(r.ok());
+    CHECK_EQ(r.out.size(), size_t(6000000));
+  }
+  // And still no waiting on a daemon with nothing to say.
+  auto t0 = std::chrono::steady_clock::now();
+  r = kg::run({"/bin/sh", "-c", "sleep 30 & echo \"daemon=$!\""}, po);
+  CHECK(r.ok());
+  CHECK(seconds_since(t0) < 1.0);
+  const size_t at = r.out.find("daemon=");
+  if (at != std::string::npos) {
+    const pid_t daemon = static_cast<pid_t>(std::atoi(r.out.c_str() + at + 7));
+    if (daemon > 0) kill(daemon, SIGKILL);
+  }
+}
+
+static void test_run_with_its_own_output_closed() {
+  section("proc: a caller with stdout or stderr closed still hears both from its program");
+  // pipe2 hands out the lowest free descriptors, so a caller with 1 and 2
+  // closed gets the pipe there, close-on-exec; dup2 onto itself is a no-op,
+  // and the program started with that output closed.
+  for (int lowest : {0, 1}) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      alarm(30);
+      for (int fd = lowest; fd <= 2; ++fd) close(fd);
+      ProcResult r = kg::run({"/bin/sh", "-c", "echo out; echo err >&2"});
+      const bool out = r.out.find("out") != std::string::npos;
+      const bool err = r.out.find("err") != std::string::npos;
+      _exit((r.ok() ? 0 : 1) + (out ? 0 : 2) + (err ? 0 : 4));
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+  }
+}
+
 static std::atomic<int> g_own_handler_calls{0};
 static void own_handler(int) { ++g_own_handler_calls; }
 
@@ -1278,6 +1333,111 @@ static void test_session_restores_signal_handlers(const fs::path& tmp) {
   CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
 }
 
+static void test_signal_is_released_off_the_handler(const fs::path& tmp) {
+  section("session: the signal handler only wakes the thread that releases the mounts");
+  // The session plays on a worker while the window's thread goes on drawing,
+  // and a handler that forks fusermount3 can land in the middle of a malloc
+  // and hang on its lock. The handler now returns at once, and a thread of
+  // the guard's unmounts and exits. The stand-in fusermount3 waits for word
+  // that the handler came back, which a handler that did the work itself
+  // could never send.
+  fs::path bin = tmp / "wake-bin";
+  fs::path log = tmp / "wake-unmounted.log";
+  fs::path back = tmp / "wake-handler-returned";
+  const std::string wait = "i=0\nwhile [ ! -e '" + back.string() +
+                           "' ] && [ $i -lt 300 ]; do sleep 0.01; i=$((i+1)); done\n";
+  write_file(bin / "fusermount3", "#!/bin/sh\n" + wait + "echo \"$@\" >> '" + log.string() + "'\n");
+  fs::permissions(bin / "fusermount3", fs::perms::owner_all);
+  const fs::path image = tmp / "wake-image";
+  pid_t pid = fork();
+  if (pid == 0) {
+    alarm(30);
+    const char* path = std::getenv("PATH");
+    setenv("PATH", (bin.string() + ":" + (path ? path : "/usr/bin:/bin")).c_str(), 1);
+    session::Layers l;
+    l.image = image;
+    l.image_mounted = true;
+    session::detail::MountInterruptGuard guard(l);
+    raise(SIGTERM);
+    std::ofstream(back) << "returned\n";
+    for (;;) pause();
+  }
+  int st = 0;
+  waitpid(pid, &st, 0);
+  CHECK(WIFEXITED(st));
+  CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 128 + SIGTERM);
+  CHECK(fs::exists(back));
+  CHECK(contains(slurp(log), "-u " + image.string()));
+}
+
+// Pointer capture is for a game. An installer run in a window got the swallowed
+// first click and the locked pointer too, because the compositor turned capture
+// on for every session on a Wayland host.
+static void test_pointer_capture_is_for_games() {
+  section("compositor: only a game session captures the pointer");
+  session::CompositorOptions co;
+  CHECK(!co.pointer_capture);  // installers and the stage probe leave it alone
+  CHECK(session::detail::pointer_capture_on(true, nullptr));
+  CHECK(session::detail::pointer_capture_on(true, "1"));
+  // The person's own KRETRO_WESTON_CAPTURE=0 still wins for a game...
+  CHECK(!session::detail::pointer_capture_on(true, "0"));
+  CHECK(!session::detail::pointer_capture_on(true, "yes"));
+  // ...and their KRETRO_WESTON_CAPTURE=1 does not reach an installer.
+  CHECK(!session::detail::pointer_capture_on(false, "1"));
+  CHECK(!session::detail::pointer_capture_on(false, nullptr));
+}
+
+static void test_socket_names_are_claimed(const fs::path& tmp) {
+  section("compositor: two sessions starting together never share a Wayland socket name");
+  // libwayland's own lock is only taken once a Weston is up, so two sessions
+  // starting side by side both saw the name free, and the second removed the
+  // first one's socket as it appeared.
+  const fs::path dir = tmp / "sockets";
+  fs::create_directories(dir);
+  session::SocketName a = session::claim_socket_name(dir, "example");
+  session::SocketName b = session::claim_socket_name(dir, "example");
+  CHECK_EQ(a.name, std::string("kretro-example"));
+  CHECK_EQ(b.name, std::string("kretro-example-2"));
+  CHECK(a.claim_fd >= 0 && b.claim_fd >= 0);
+  // Another process sees them taken too.
+  int p[2];
+  if (pipe(p) == 0) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      close(p[0]);
+      session::SocketName c = session::claim_socket_name(dir, "example");
+      const ssize_t w = write(p[1], c.name.data(), c.name.size());
+      (void)w;
+      _exit(0);
+    }
+    close(p[1]);
+    char buf[64] = {};
+    const ssize_t got = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECK_EQ(std::string(buf, got > 0 ? static_cast<size_t>(got) : 0), std::string("kretro-example-3"));
+  }
+  // Let go, the name is free again; a socket a killed Weston left is removed.
+  close(a.claim_fd);
+  write_file(dir / "kretro-example", "stale");
+  write_file(dir / "kretro-example.lock", "");
+  session::SocketName again = session::claim_socket_name(dir, "example");
+  CHECK_EQ(again.name, std::string("kretro-example"));
+  CHECK(!fs::exists(dir / "kretro-example"));
+  close(again.claim_fd);
+  // A live compositor's socket - its lock held - is left alone.
+  write_file(dir / "kretro-example", "live");
+  const int held = open((dir / "kretro-example.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  CHECK(held >= 0 && flock(held, LOCK_EX | LOCK_NB) == 0);
+  session::SocketName next = session::claim_socket_name(dir, "example");
+  CHECK_EQ(next.name, std::string("kretro-example-3"));
+  CHECK(fs::exists(dir / "kretro-example"));
+  close(next.claim_fd);
+  close(held);
+  close(b.claim_fd);
+}
+
 static void test_play_stops_when_asked(const fs::path& tmp) {
   section("session: a stop asked before the prefix is touched ends the session there");
   fs::path file = tmp / "classics.run";
@@ -1318,7 +1478,24 @@ static void test_play_stops_when_asked(const fs::path& tmp) {
   CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
 }
 
-int main() {
+// What test_run_reads_what_is_left_in_the_pipe runs: `n` bytes into a pipe
+// made as big as the kernel allows, and an exit the moment the last of them
+// is in it.
+static int write_and_exit(size_t n) {
+  fcntl(STDOUT_FILENO, F_SETPIPE_SZ, 1 << 20);
+  const std::string buf(1 << 16, 'x');
+  while (n > 0) {
+    const ssize_t w = write(STDOUT_FILENO, buf.data(), std::min(n, buf.size()));
+    if (w <= 0) return 1;
+    n -= static_cast<size_t>(w);
+  }
+  return 0;
+}
+
+int main(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[1]) == "--write-and-exit") {
+    return write_and_exit(static_cast<size_t>(std::strtoull(argv[2], nullptr, 10)));
+  }
   const char* base = std::getenv("TMPDIR");
   fs::path tmp = fs::path(base && *base ? base : "/tmp") / ("kretro-test-player-" + std::to_string(getpid()));
   fs::remove_all(tmp);
@@ -1355,7 +1532,12 @@ int main() {
     test_offscreen_env_has_no_display();
     test_run_returns_with_its_child();
     test_run_timeout_covers_the_read();
+    test_run_reads_what_is_left_in_the_pipe();
+    test_run_with_its_own_output_closed();
     test_session_restores_signal_handlers(tmp);
+    test_signal_is_released_off_the_handler(tmp);
+    test_pointer_capture_is_for_games();
+    test_socket_names_are_claimed(tmp);
     test_play_stops_when_asked(tmp);
   } catch (const std::exception& e) {
     kgtest::unexpected(e);

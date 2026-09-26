@@ -13,6 +13,7 @@
 #include "../config/config.h"
 #include "../config/scaling.h"
 #include "../disc/drive.h"
+#include "../util/env.h"
 #include "../util/format.h"
 #include "../util/paths.h"
 #include "compositor.h"
@@ -306,8 +307,11 @@ void apply_renderer(const PlayState& st) {
 // toolkit into the packing tool and the unit tests.
 void geometry(PlayState& st) {
   const Meta& m = *st.m;
+  // On a Wayland host the window is the game plus the frame Weston draws
+  // around it, and the whole window has to fit the work area.
   const config::Panel panel{st.req.display.panel_w, st.req.display.panel_h,
-                            st.req.display.usable_w, st.req.display.usable_h};
+                            st.req.display.usable_w, st.req.display.usable_h,
+                            config::weston_window_frame(env_nonempty("WAYLAND_DISPLAY"))};
   config::Display want = st.req.display.scaling
                              ? *st.req.display.scaling
                              : config::for_game(config::load(config::config_file()), st.id);
@@ -329,12 +333,14 @@ void compositor_options(PlayState& st) {
   co.width = st.geo.logical_w;
   co.height = st.geo.logical_h;
   co.scale = st.geo.scale;
+  co.window_scale = st.geo.window_scale;
   co.fullscreen = st.geo.fullscreen || st.req.display.fullscreen;
   co.socket_suffix = st.id;
   co.home = st.home;
   co.capture_dir = journal_dir(st.id);
   co.capture = st.req.record;
   co.pause_on_blur = st.m->present.pause_on_blur;
+  co.pointer_capture = true;  // a game, unlike an installer, keeps the pointer
   co.stop_after = st.req.stop_after;
   // Xwayland answering is the game's screen being up: Weston's window is
   // mapped by then, and the game is started a moment later.

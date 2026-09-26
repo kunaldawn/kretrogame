@@ -211,7 +211,13 @@ scanner="$(cd "$out" && find usr/lib usr/libexec -name gst-plugin-scanner -type 
   echo "prefix   $(cat /opt/kretro/prefix-template/.kretro-wine-version 2>/dev/null || echo 'missing')"
   echo "dxvk     $(ls -d /opt/dxvk-* 2>/dev/null | xargs -rn1 basename | tr '\n' ' ')(default $(readlink /opt/dxvk 2>/dev/null || echo none))"
   echo "cnc-ddraw $(cat /opt/cnc-ddraw/VERSION 2>/dev/null || echo 'missing')"
-  echo "weston   $(weston --version 2>/dev/null || echo 'missing')"
+  # The wayland backend is rebuilt with kretro's patches (Dockerfile.runtime,
+  # runtime/weston/); the version says so, and which ones.
+  wv="$(weston --version 2>/dev/null || echo 'missing')"
+  if [ -f /usr/share/kretro/weston/PATCHES ]; then
+    wv="$wv+kretro ($(paste -sd' ' /usr/share/kretro/weston/PATCHES))"
+  fi
+  echo "weston   $wv"
   echo "xwayland $({ Xwayland -version 2>&1 || echo missing; } | head -1)"
   echo "gst-scanner ${scanner:-missing}"
 } | tee "$out/RUNTIME"

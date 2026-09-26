@@ -43,11 +43,6 @@ int64_t now_ms() {
   return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
-// How long the output is still read once the child has exited. What it wrote
-// before it exited is already in the pipe and takes no time to read; anything
-// later is from a process it left behind.
-constexpr int64_t kDrainMs = 100;
-
 void fill(ProcResult& r, int st) {
   if (WIFEXITED(st)) {
     r.status = WEXITSTATUS(st);
@@ -77,9 +72,14 @@ ProcResult run(const std::vector<std::string>& argv, const ProcOptions& opt) {
 
   if (pid == 0) {
     if (opt.capture) {
-      // dup2 leaves the new descriptors without close-on-exec.
       dup2(pipefd[1], STDOUT_FILENO);
       dup2(pipefd[1], STDERR_FILENO);
+      // dup2 onto a different descriptor leaves close-on-exec off, but onto
+      // the same one it does nothing at all. A parent with 1 or 2 closed gets
+      // the pipe there from pipe2, close-on-exec and all, and the program
+      // would start with that output closed.
+      fcntl(STDOUT_FILENO, F_SETFD, 0);
+      fcntl(STDERR_FILENO, F_SETFD, 0);
     }
     if (!opt.cwd.empty() && chdir(opt.cwd.c_str()) != 0) _exit(126);
     for (const auto& [k, v] : opt.env) setenv(k.c_str(), v.c_str(), 1);
@@ -114,25 +114,46 @@ ProcResult run(const std::vector<std::string>& argv, const ProcOptions& opt) {
     // behind - every Wine command leaves a wineserver and its services for a
     // few seconds - would otherwise keep the pipe open, and this call with
     // it, for as long as the daemon lives.
-    int64_t drain_until = -1;
-    char buf[1 << 14];
+    //
+    // So once the child is reaped the pipe is read until it ends, or until it
+    // has nothing to say and the grace is over. Never cut while there is
+    // something to read: what the child wrote before it exited is in the pipe
+    // still, and a busy machine can take longer than any grace to get to it -
+    // 7z -so leaves the last of a member there, and a hash of it that stops
+    // short is a wrong hash reported as a good one.
+    const int64_t grace = opt.grace_ms > 0 ? opt.grace_ms : 0;
+    int64_t grace_until = -1;
+    char buf[1 << 16];
     while (true) {
       if (!reaped) {
         const pid_t w = waitpid(pid, &st, WNOHANG);
         if (w == pid) {
           reaped = true;
-          drain_until = now_ms() + kDrainMs;
+          grace_until = now_ms() + grace;
         } else if (w < 0 && errno != EINTR) {
           close(pipefd[0]);
           return r;
         }
       }
-      if (reaped && now_ms() >= drain_until) break;
+      // The deadline is for the program; once it has gone, what is left in
+      // the pipe is read whatever the time.
       if (!reaped && expired()) break;
+      int wait_ms = 20;
+      if (reaped) {
+        const int64_t left = grace_until - now_ms();
+        wait_ms = left <= 0 ? 0 : static_cast<int>(left < 10 ? left : 10);
+      }
       pollfd pfd{pipefd[0], POLLIN, 0};
-      const int n = poll(&pfd, 1, reaped ? 10 : 20);
-      if (n < 0 && errno != EINTR) break;
-      if (n <= 0) continue;
+      const int n = poll(&pfd, 1, wait_ms);
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (n == 0) {
+        // Nothing to read: only now may the grace end the call.
+        if (reaped && now_ms() >= grace_until) break;
+        continue;
+      }
       const ssize_t got = read(pipefd[0], buf, sizeof(buf));
       if (got > 0) {
         r.out.append(buf, static_cast<size_t>(got));
@@ -146,10 +167,7 @@ ProcResult run(const std::vector<std::string>& argv, const ProcOptions& opt) {
 
   while (!reaped) {
     const pid_t w = waitpid(pid, &st, deadline >= 0 ? WNOHANG : 0);
-    if (w == pid) {
-      reaped = true;
-      break;
-    }
+    if (w == pid) break;
     if (w < 0 && errno != EINTR) return r;
     if (expired()) {
       kill(pid, SIGKILL);

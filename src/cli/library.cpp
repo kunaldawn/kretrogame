@@ -14,6 +14,7 @@
 #include "handlers.h"
 #include "../pack/kgpack.h"
 #include "../rt/env.h"
+#include "../util/env.h"
 #include "../util/format.h"
 #include "../util/hash.h"
 #include "../util/paths.h"
@@ -100,7 +101,10 @@ int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
   config::Config cfg = config::load(config::config_file());
   config::Display d = config::for_game(cfg, id);
   config::Geometry g =
-      config::compute_geometry(m.run.width, m.run.height, {pw, ph, ps.usable_w, ps.usable_h}, d);
+      config::compute_geometry(m.run.width, m.run.height,
+                               {pw, ph, ps.usable_w, ps.usable_h,
+                                config::weston_window_frame(env_nonempty("WAYLAND_DISPLAY"))},
+                               d);
 
   std::printf("%s\n", m.name.c_str());
   std::printf("  the game renders at   %ux%u\n", g.logical_w, g.logical_h);

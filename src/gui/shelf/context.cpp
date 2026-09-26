@@ -49,7 +49,7 @@ void ShelfContext::play(std::string id) {
   const std::string name = at < entries.size() && entries[at].id == id && !entries[at].name.empty()
                                ? entries[at].name
                                : id;
-  playing_ = id;
+  playing_ = std::move(id);
   screen_up_ = false;
   job.locked([this] { played_.clear(); });
   job.clear_cancel();

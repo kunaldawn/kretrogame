@@ -79,7 +79,11 @@ PanelSize measure_in_process() {
     ps.h = wl.h;
     ps.usable_w = have_x ? rescale(x.usable_w, wl.w, x.w) : wl.w;
     ps.usable_h = have_x ? rescale(x.usable_h, wl.h, x.h) : wl.h;
-  } else if (have_x) {
+  } else if (have_x && !wayland) {
+    // Only on an X11 host. Under a Wayland host the X numbers can be in
+    // Xwayland's scaled-up pixels, twice the desktop the game's window is
+    // placed on; with no Wayland answer (a monitor switched off, say) the
+    // panel is better unknown - the game then opens at 1x - than wrong.
     ps = {x.w, x.h, x.usable_w, x.usable_h};
   } else if (!wayland && !x11) {
     // Whatever SDL picks by itself, as it always was asked: kretro without a
@@ -131,9 +135,13 @@ PanelSize desktop_size(bool require_display_env) {
   const bool x_under_wayland =
       env_nonempty("WAYLAND_DISPLAY") && driver && std::strcmp(driver, "x11") == 0;
   PanelSize ps;
-  if (x_under_wayland && measure_by_helper(ps)) return ps;
-  // Right as it is on an X11 host, and the best there is when the helper
-  // could not answer.
+  if (x_under_wayland) {
+    // An unanswered helper leaves the panel unknown rather than measured in
+    // units the game's window is not placed in (see measure_in_process).
+    measure_by_helper(ps);
+    return ps;
+  }
+  // Right as it is on an X11 host.
   Area a;
   if (measure_current(a)) ps = {a.w, a.h, a.usable_w, a.usable_h};
   return ps;

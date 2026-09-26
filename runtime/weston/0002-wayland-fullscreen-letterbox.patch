@@ -1,0 +1,302 @@
+wayland backend: fullscreen as a whole-number letterbox of a game's screen
+
+With KRETRO_WESTON_GAME=WxH (and KRETRO_WESTON_WINDOW_SCALE=N), the
+output is a game's screen of that size:
+
+- fullscreen keeps the output W x H logical and sets its scale to the
+  largest whole number that fits the size the host configures; the host
+  centres the smaller surface, as xdg-shell's set_fullscreen describes;
+- windowed is W*N x H*N with the frame, and sizes the host proposes for
+  the window are ignored, so it comes back from fullscreen exactly as it
+  was (and without the theme's images it is an undecorated window rather
+  than a failed toggle);
+- --fullscreen is only the starting state: the output is still created
+  through the windowed-output API with --width/--height/--scale;
+- Alt+F11 toggles as well as Ctrl+Alt+F, on the window with the keyboard;
+- the host's own fullscreen (its key binding or window menu) is followed
+  the same way: frame, scale and the toggle's state go with it.
+
+Without KRETRO_WESTON_GAME everything is as upstream.
+
+--- a/libweston/backend-wayland/wayland.c
++++ b/libweston/backend-wayland/wayland.c
+@@ -108,6 +108,17 @@
+ 	 * taking the lock away, lets it go again. */
+ 	bool capture_on_click;
+ 
++	/* KRETRO_WESTON_GAME=WxH and KRETRO_WESTON_WINDOW_SCALE=N: the
++	 * output is a game's screen of that size. Fullscreen then keeps the
++	 * output at that size and picks the largest whole-number scale that
++	 * fits the host's screen, and the host centres it; windowed is the
++	 * game at the window scale, whatever the host proposes. A game
++	 * width of 0 leaves the stock behaviour alone. */
++	struct {
++		int game_w, game_h;
++		int window_scale;
++	} letterbox;
++
+ 	struct theme *theme;
+ 	cairo_device_t *frame_device;
+ 	struct wl_cursor_theme *cursor_theme;
+@@ -143,6 +154,19 @@
+ 	char *title;
+ 	struct frame *frame;
+ 
++	/* Letterbox mode only: fullscreen, as asked for or as the host made
++	 * it, and not yet undone. */
++	bool letterbox_fullscreen;
++	/* Letterbox mode only: the state the host's last configure had. */
++	bool letterbox_host_fullscreen;
++	/* Letterbox mode only: a change of state has been asked of the host
++	 * and no configure has shown it yet, so a configure that disagrees
++	 * was sent before the request, not the host changing its mind. Only
++	 * a change: a host need not answer a request for the state it
++	 * already has, and a pending flag nobody clears would hide the
++	 * host's own changes for good. */
++	bool letterbox_pending;
++
+ 	struct {
+ 		struct wl_egl_window *egl_window;
+ 		struct weston_gl_borders borders;
+@@ -954,6 +978,85 @@
+ 	}
+ }
+ 
++/* Sets the output to game size times `scale`. The logical size of the
++ * output stays the game's, so the X root still fills it exactly; only the
++ * number of host pixels per game pixel changes. */
++static void
++letterbox_set_scale(struct wayland_output *output, int scale)
++{
++	struct wayland_backend *b = output->backend;
++	int w = b->letterbox.game_w * scale;
++	int h = b->letterbox.game_h * scale;
++
++	if (output->base.current_mode &&
++	    output->base.current_mode->width == w &&
++	    output->base.current_mode->height == h &&
++	    output->base.current_scale == scale) {
++		wayland_output_resize_surface(output);
++		return;
++	}
++
++	output->native_mode.width = w;
++	output->native_mode.height = h;
++	output->native_mode.refresh = output->mode.refresh;
++	if (weston_output_mode_set_native(&output->base, &output->native_mode,
++					  scale) < 0)
++		weston_log("letterbox: cannot set %dx%d at %d\n", w, h, scale);
++}
++
++/* The output's side of going fullscreen, whoever asked for it: Alt+F11
++ * here, or the host's own fullscreen. The scale comes with the configure
++ * that carries the host's size. */
++static void
++letterbox_enter_fullscreen(struct wayland_output *output)
++{
++	output->letterbox_fullscreen = true;
++	if (output->frame) {
++		frame_destroy(output->frame);
++		output->frame = NULL;
++	}
++	wayland_output_resize_surface(output);
++}
++
++/* The output's side of leaving fullscreen, whoever asked for it. */
++static void
++letterbox_leave_fullscreen(struct wayland_output *output)
++{
++	struct wayland_backend *b = output->backend;
++
++	output->letterbox_fullscreen = false;
++	/* Without the theme's images there is no frame; the window is
++	 * still a window, only an undecorated one. */
++	if (!output->frame) {
++		if (!b->theme)
++			b->theme = theme_create();
++		if (b->theme)
++			output->frame = frame_create(b->theme, 100, 100,
++						     FRAME_BUTTON_CLOSE,
++						     output->title, NULL);
++		if (output->frame && output->keyboard_count)
++			frame_set_flag(output->frame, FRAME_FLAG_ACTIVE);
++		output_refresh_capture_title(output);
++	}
++	letterbox_set_scale(output, b->letterbox.window_scale);
++}
++
++static void
++letterbox_set_fullscreen(struct wayland_output *output)
++{
++	letterbox_enter_fullscreen(output);
++	output->letterbox_pending = !output->letterbox_host_fullscreen;
++	xdg_toplevel_set_fullscreen(output->parent.xdg_toplevel, NULL);
++}
++
++static void
++letterbox_set_windowed(struct wayland_output *output)
++{
++	letterbox_leave_fullscreen(output);
++	output->letterbox_pending = output->letterbox_host_fullscreen;
++	xdg_toplevel_unset_fullscreen(output->parent.xdg_toplevel);
++}
++
+ static struct weston_mode *
+ wayland_output_choose_mode(struct wayland_output *output,
+ 			   struct weston_mode *ref_mode)
+@@ -1196,6 +1299,7 @@
+ 			  struct wl_array *states)
+ {
+ 	struct wayland_output *output = data;
++	struct wayland_backend *b = output->backend;
+ 	bool should_send_resize = false;
+ 
+ 	output->parent.configure_width = width;
+@@ -1203,6 +1307,54 @@
+ 
+ 	output->parent.wait_for_configure = false;
+ 
++	if (b->letterbox.game_w > 0) {
++		uint32_t *state;
++		bool fullscreen = false;
++		int scale;
++
++		wl_array_for_each(state, states)
++			if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN)
++				fullscreen = true;
++
++		output->letterbox_host_fullscreen = fullscreen;
++
++		/* Before the output is enabled there is nothing to resize. */
++		if (!output->base.enabled)
++			return;
++
++		if (output->letterbox_pending) {
++			/* Sent before our request reached the host. */
++			if (fullscreen != output->letterbox_fullscreen)
++				return;
++			output->letterbox_pending = false;
++		} else if (fullscreen != output->letterbox_fullscreen) {
++			/* The host changed it itself: its own fullscreen
++			 * binding, or its window menu. Follow it, as Alt+F11
++			 * would have, or the next toggle goes the wrong way
++			 * and the window keeps the wrong frame and scale. */
++			if (fullscreen) {
++				letterbox_enter_fullscreen(output);
++			} else {
++				letterbox_leave_fullscreen(output);
++				weston_output_schedule_repaint(&output->base);
++			}
++		}
++
++		/* A size proposed for a window is ignored: the window is the
++		 * game at its scale and nothing else, so it comes back from
++		 * fullscreen exactly as it was. */
++		if (!fullscreen || width <= 0 || height <= 0)
++			return;
++
++		scale = MIN(width / b->letterbox.game_w,
++			    height / b->letterbox.game_h);
++		if (scale < 1)
++			scale = 1;
++		letterbox_set_scale(output, scale);
++		weston_output_schedule_repaint(&output->base);
++		return;
++	}
++
+ 	if (width > 0 && height > 0) {
+ 		if (output->frame) {
+ 			int32_t top, bottom, left, right;
+@@ -1354,6 +1506,11 @@
+ 									output->parent.output);
+ 
+ 		}
++	} else if (b->letterbox.game_w > 0) {
++		if (b->fullscreen)
++			letterbox_set_fullscreen(output);
++		else
++			letterbox_set_windowed(output);
+ 	} else if (b->fullscreen) {
+ 		wayland_output_set_fullscreen(output, 0, NULL);
+ 	} else {
+@@ -1398,7 +1555,7 @@
+ 		if (wayland_output_setup_for_parent_output(output,
+ 							   head->parent_output) < 0)
+ 			return -1;
+-	} else if (b->fullscreen) {
++	} else if (b->fullscreen && b->letterbox.game_w == 0) {
+ 		if (wayland_output_setup_fullscreen(output, head) < 0)
+ 			return -1;
+ 	} else {
+@@ -3188,7 +3345,26 @@
+ 		if (&input->base == keyboard->seat)
+ 			break;
+ 
+-	if (!input || !input->output)
++	if (!input)
++		return;
++
++	/* The window with the keyboard, which is the one the keys were
++	 * pressed in, wherever the pointer happens to be. */
++	if (b->letterbox.game_w > 0) {
++		struct wayland_output *output =
++			input->keyboard_focus ? input->keyboard_focus : input->output;
++
++		if (!output)
++			return;
++		if (output->letterbox_fullscreen)
++			letterbox_set_windowed(output);
++		else
++			letterbox_set_fullscreen(output);
++		weston_output_schedule_repaint(&output->base);
++		return;
++	}
++
++	if (!input->output)
+ 		return;
+ 
+ 	if (input->output->frame)
+@@ -3246,6 +3422,21 @@
+ 	b->capture_on_click = getenv("KRETRO_WESTON_CAPTURE") &&
+ 			      strcmp(getenv("KRETRO_WESTON_CAPTURE"), "1") == 0;
+ 
++	{
++		const char *game = getenv("KRETRO_WESTON_GAME");
++		const char *ws = getenv("KRETRO_WESTON_WINDOW_SCALE");
++		int gw = 0, gh = 0;
++
++		if (game && sscanf(game, "%dx%d", &gw, &gh) == 2 &&
++		    gw > 0 && gh > 0) {
++			b->letterbox.game_w = gw;
++			b->letterbox.game_h = gh;
++			b->letterbox.window_scale = ws ? atoi(ws) : 1;
++			if (b->letterbox.window_scale < 1)
++				b->letterbox.window_scale = 1;
++		}
++	}
++
+ 	b->formats_count = ARRAY_LENGTH(wayland_formats);
+ 	b->formats = pixel_format_get_array(wayland_formats, b->formats_count);
+ 
+@@ -3381,7 +3572,7 @@
+ 		return 0;
+ 	}
+ 
+-	if (new_config.fullscreen) {
++	if (new_config.fullscreen && b->letterbox.game_w == 0) {
+ 		if (!wayland_head_create(b, "wayland-fullscreen")) {
+ 			weston_log("Unable to create a fullscreen head.\n");
+ 			goto err_outputs;
+@@ -3403,6 +3594,12 @@
+ 	weston_compositor_add_key_binding(compositor, KEY_F,
+ 				          MODIFIER_CTRL | MODIFIER_ALT,
+ 				          fullscreen_binding, b);
++	/* Alt+F11 as well for a game: F11 alone belongs to the game, and
++	 * Alt+Enter is what Windows games handle themselves. */
++	if (b->letterbox.game_w > 0)
++		weston_compositor_add_key_binding(compositor, KEY_F11,
++						  MODIFIER_ALT,
++						  fullscreen_binding, b);
+ 	return 0;
+ 
+ err_outputs:

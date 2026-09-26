@@ -9,6 +9,51 @@
 # One image, two runtimes. assemble-runtime cuts it into kretro's runtime,
 # which keeps the authoring tools, and the player's, which does not. Both carry
 # the same Wine, so what an author test-plays is what ships.
+
+# Weston's wayland backend, rebuilt with the patches in weston/. It is the one
+# part of the display chain that is a client of the host, so it is the only
+# place the host pointer can be locked and the host window made fullscreen
+# (see the patches' own headers for what they change). Only the backend module
+# is built and only it is copied over Ubuntu's: the frontend, libweston and the
+# shells stay the packaged ones. The module is built against libweston's
+# internal headers, so it must come from exactly the version the package is;
+# the final stage checks that. The tarball is upstream's release, whose sha256
+# is also the one Debian's weston_14.0.2.orig.tar.xz carries.
+FROM ubuntu:26.04 AS weston-build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils patch build-essential meson ninja-build \
+      pkg-config wayland-protocols libwayland-dev libxkbcommon-dev \
+      libpixman-1-dev libinput-dev libevdev-dev libdrm-dev libcairo2-dev \
+      libpango1.0-dev libpng-dev libegl-dev libgles-dev libgbm-dev \
+ && rm -rf /var/lib/apt/lists/*
+ARG WESTON_VERSION=14.0.2
+ARG WESTON_SHA256=b47216b3530da76d02a3a1acbf1846a9cd41d24caa86448f9c46f78f20b6e0ac
+COPY weston/ /src/patches/
+RUN set -eux; \
+    f="weston-${WESTON_VERSION}.tar.xz"; \
+    curl -fsSL -o "/tmp/$f" \
+      "https://gitlab.freedesktop.org/wayland/weston/-/releases/${WESTON_VERSION}/downloads/$f"; \
+    echo "${WESTON_SHA256}  /tmp/$f" | sha256sum -c -; \
+    mkdir -p /src/weston; tar -xJf "/tmp/$f" -C /src/weston --strip-components=1; rm "/tmp/$f"; \
+    cd /src/weston; \
+    for p in /src/patches/*.patch; do patch -p1 --no-backup-if-mismatch < "$p"; done; \
+    meson setup build --buildtype=release \
+      -Dbackend-wayland=true -Drenderer-gl=true -Dbackend-default=wayland \
+      -Dbackend-drm=false -Dbackend-drm-screencast-vaapi=false \
+      -Dbackend-headless=false -Dbackend-pipewire=false -Dbackend-rdp=false \
+      -Dscreenshare=false -Dbackend-vnc=false -Dbackend-x11=false \
+      -Dxwayland=false -Dsystemd=false -Dremoting=false -Dpipewire=false \
+      -Dshell-desktop=false -Dshell-fullscreen=false -Dshell-ivi=false \
+      -Dshell-kiosk=false -Dcolor-management-lcms=false -Dimage-jpeg=false \
+      -Dimage-webp=false -Dtools= -Ddemo-clients=false -Dsimple-clients= \
+      -Dresize-pool=false -Dwcap-decode=false -Dtests=false -Ddoc=false; \
+    ninja -C build libweston/backend-wayland/wayland-backend.so; \
+    mkdir -p /out; \
+    cp build/libweston/backend-wayland/wayland-backend.so /out/; \
+    (cd /src/patches && ls *.patch) > /out/PATCHES; \
+    echo "${WESTON_VERSION}" > /out/VERSION
+
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -171,6 +216,19 @@ RUN set -eux; \
     for d in /opt/dxvk-3 /opt/dxvk-2 /opt/cnc-ddraw; do \
       (cd "$d" && find . -name '*.dll' | sort | xargs sha256sum > SHA256SUMS); \
     done
+
+# The patched wayland backend, over the packaged one. Here at the end so that
+# changing the patches rebuilds nothing above. It uses libweston's internal
+# ABI, so the package it lands in has to be the very version it was built
+# from: anything else stops the build here instead of crashing a game later.
+COPY --from=weston-build /out/ /usr/share/kretro/weston/
+RUN set -eux; \
+    v="$(cat /usr/share/kretro/weston/VERSION)"; \
+    [ "$(weston --version)" = "weston $v" ]; \
+    dpkg-query -W -f='${Version}' libweston-14-0 | grep -q "^$v-"; \
+    mv /usr/share/kretro/weston/wayland-backend.so \
+       /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so; \
+    grep -q KRETRO_WESTON_GAME /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so
 
 COPY assemble-runtime.sh /usr/local/bin/assemble-runtime
 COPY asound.conf /usr/share/kretro/alsa/asound.conf

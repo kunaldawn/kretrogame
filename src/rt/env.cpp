@@ -126,6 +126,12 @@ Env make(const gpu::Report* gl) {
     }
     if (!map.empty()) e.set("WESTON_MODULE_MAP", map);
   }
+  // The frame of Weston's window draws its buttons from images in a data
+  // directory that is also compiled in, as the host's /usr/share/weston.
+  // Without them the frame cannot be made: the window has no title bar, and
+  // the fullscreen toggle, which goes by whether there is a frame, does
+  // nothing.
+  set_if_there(e, "WESTON_DATA_DIR", "usr/share/weston");
 
   // alsa-lib reads /usr/share/alsa/alsa.conf off the host unless told
   // otherwise, and that file can pull in any plugin the host's distribution

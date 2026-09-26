@@ -31,11 +31,25 @@ namespace kg::session {
 bool set_title_art(const std::filesystem::path& frames, const std::filesystem::path& frame,
                    bool provisional);
 
+// A Wayland socket name in `dir` for a session's Weston, and this process's
+// claim on it: kretro-<suffix>, or the first of kretro-<suffix>-2, -3 ... that
+// nobody has, live or claimed. The claim is an open descriptor holding an
+// flock, which the caller keeps open until its compositor is gone and then
+// closes. Throws when all of them are taken.
+struct SocketName {
+  std::string name;
+  int claim_fd = -1;
+};
+SocketName claim_socket_name(const std::filesystem::path& dir, const std::string& suffix);
+
 struct CompositorOptions {
   uint32_t width = 800;
   uint32_t height = 600;
   uint32_t scale = 1;
-  bool fullscreen = false;
+  // The scale as a window, which the fullscreen toggle goes back to. Zero
+  // means `scale`. Fullscreen picks its own scale from the host's screen.
+  uint32_t window_scale = 0;
+  bool fullscreen = false;  // the state the window starts in; Alt+F11 toggles it
   std::string socket_suffix;              // distinguishes concurrent sessions
   std::filesystem::path home;             // where weston.ini and the logs go
   std::filesystem::path capture_dir;      // where harvested frames go
@@ -52,6 +66,12 @@ struct CompositorOptions {
   // - and the first frame of the first real play takes the tile back.
   bool title_is_provisional = false;
   bool pause_on_blur = true;
+  // A click in the window locks the host pointer to it (Wayland hosts only,
+  // through the patched backend in runtime/weston/), and swallows that click.
+  // That is for a game, which wants every movement and a pointer that stops at
+  // its edges. An installer or winecfg is a desktop program that is clicked
+  // and left, so it is off unless a caller asks, and only play does.
+  bool pointer_capture = false;
   int stop_after = 0;                     // seconds; 0 waits for the program
   // Some Windows programs are stubs: InstallShield's setup.exe extracts its
   // engine, launches it and exits within seconds. Waiting only for the process

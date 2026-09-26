@@ -34,4 +34,8 @@ std::string find_ci_in_dir(const fs::path& dir, const std::string& want) {
   return "";
 }
 
+bool pointer_capture_on(bool asked, const char* setting) {
+  return asked && (!setting || std::string(setting) == "1");
+}
+
 }  // namespace kg::session::detail

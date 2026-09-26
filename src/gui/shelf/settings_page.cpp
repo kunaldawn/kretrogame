@@ -11,6 +11,7 @@
 #include "../../config/config.h"
 #include "../../config/scaling.h"
 #include "../../pack/kgpack.h"
+#include "../../util/env.h"
 #include "../palette.h"
 #include "../widgets.h"
 #include "imgui.h"
@@ -100,7 +101,10 @@ void SettingsPage::draw() {
     const Entry& en = ctx_.entries[ctx_.selected < ctx_.entries.size() ? ctx_.selected : 0];
     const uint32_t gw = game_w_, gh = game_h_;
     config::Geometry g = config::compute_geometry(
-        gw, gh, {panel_.w, panel_.h, panel_.usable_w, panel_.usable_h}, config::for_game(cfg, en.id));
+        gw, gh,
+        {panel_.w, panel_.h, panel_.usable_w, panel_.usable_h,
+         config::weston_window_frame(env_nonempty("WAYLAND_DISPLAY"))},
+        config::for_game(cfg, en.id));
     char would[160];
     std::snprintf(would, sizeof would, "would run at %ux%u at %ux -> %ux%u%s", gw, gh, g.scale,
                   g.logical_w * g.scale, g.logical_h * g.scale, g.fullscreen ? ", fullscreen" : "");

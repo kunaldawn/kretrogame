@@ -24,6 +24,7 @@
 namespace kg::session {
 namespace fs = std::filesystem;
 
+using detail::pointer_capture_on;
 using detail::wait_for;
 
 namespace {
@@ -72,15 +73,31 @@ void write_weston_ini(const rt::Env& e, const fs::path& home) {
       << "path=" << (e.root / "usr/libexec/weston-keyboard").string() << "\n";
 }
 
-// A running Weston, and the name of the Wayland socket it answers on.
+// A descriptor closed when this goes, and with it the flock held on it.
+struct Claim {
+  int fd = -1;
+  Claim() = default;
+  explicit Claim(int f) : fd(f) {}
+  Claim(Claim&& o) noexcept : fd(o.fd) { o.fd = -1; }
+  Claim(const Claim&) = delete;
+  Claim& operator=(const Claim&) = delete;
+  Claim& operator=(Claim&&) = delete;
+  ~Claim() {
+    if (fd >= 0) close(fd);
+  }
+};
+
+// A running Weston, and the name of the Wayland socket it answers on. The
+// claim on the name is declared first so it is let go last, once the
+// compositor is gone.
 struct Weston {
+  Claim claim;
   ScopedChild child;
   std::string socket;
 };
 
-// The name of the Wayland socket for this session: kretro-<suffix>, or the
-// first of kretro-<suffix>-2, -3 ... that no live compositor has.
-//
+}  // namespace
+
 // libwayland holds an flock on <socket>.lock for as long as the compositor
 // that made the socket lives, so a lock nobody holds is a socket left by a
 // Weston that was killed. That one is removed: left there, we would see the
@@ -89,24 +106,39 @@ struct Weston {
 // the same game played from another state directory, or a player and kretro
 // side by side - and removing its socket took that session's display away
 // from everything that looks it up by name.
-std::string free_socket_name(const fs::path& base, const std::string& suffix) {
+//
+// That lock is only taken once a Weston is up, and two sessions starting
+// together would both see the name free, and the second would remove the
+// first one's socket as it appeared. So a name is first claimed with an flock
+// of our own on <socket>.kretro, taken before anything is looked at and held
+// until the compositor is gone: whoever holds it has the name, and another
+// kretro, in this process or another, goes on to the next.
+SocketName claim_socket_name(const fs::path& dir, const std::string& suffix) {
   std::error_code ec;
   const std::string stem = "kretro-" + suffix;
   for (int n = 1; n < 100; ++n) {
     const std::string name = n == 1 ? stem : stem + "-" + std::to_string(n);
-    const fs::path lock = base / (name + ".lock");
+    Claim claim(open((dir / (name + ".kretro")).c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600));
+    if (claim.fd < 0 || flock(claim.fd, LOCK_EX | LOCK_NB) != 0) continue;
+    const fs::path lock = dir / (name + ".lock");
     const int fd = open(lock.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
       const bool live = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
       close(fd);
       if (live) continue;
     }
-    fs::remove(base / name, ec);
+    fs::remove(dir / name, ec);
     fs::remove(lock, ec);
-    return name;
+    SocketName out;
+    out.name = name;
+    out.claim_fd = claim.fd;
+    claim.fd = -1;
+    return out;
   }
   throw std::runtime_error("no free Wayland socket name for " + stem);
 }
+
+namespace {
 
 Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorOptions& opt,
                     uint32_t w, uint32_t h, uint32_t s,
@@ -115,8 +147,12 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
   const fs::path& home = opt.home;
   const char* xdg = env_nonempty("XDG_RUNTIME_DIR");
   const fs::path run_dir = xdg ? fs::path(xdg) : fs::path("/tmp");
-  const std::string socket = free_socket_name(run_dir, opt.socket_suffix);
+  SocketName claimed = claim_socket_name(run_dir, opt.socket_suffix);
+  Claim claim(claimed.claim_fd);
+  const std::string& socket = claimed.name;
   std::vector<std::string> wargs;
+  const bool wayland_host = env_nonempty("WAYLAND_DISPLAY") != nullptr;
+  const bool pointer_capture = pointer_capture_on(opt.pointer_capture, env_nonempty("KRETRO_WESTON_CAPTURE"));
   // Weston runs as an ordinary client of whatever the host has, which is what
   // keeps this on the well-trodden path on both Wayland and X11 hosts - unless
   // nobody is meant to see it, in which case it renders into a buffer and no
@@ -125,7 +161,7 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
   // window that is one surface, and no X window manager in the picture.
   wargs.push_back(opt.headless
                       ? "--backend=headless"
-                      : (env_nonempty("WAYLAND_DISPLAY") ? "--backend=wayland" : "--backend=x11"));
+                      : (wayland_host ? "--backend=wayland" : "--backend=x11"));
   wargs.push_back("--socket=" + socket);
   wargs.push_back("--debug");  // enables the capture protocol the journal uses
   if (opt.headless) {
@@ -136,15 +172,34 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
     wargs.push_back("--height=" + std::to_string(h));
     say("display: headless " + std::to_string(w) + "x" + std::to_string(h) +
         " - drawn inside our own window");
-  } else if (opt.fullscreen) {
+  } else if (opt.fullscreen && !wayland_host) {
+    // The x11 backend is stock: fullscreen is the whole X screen at 1x.
     wargs.push_back("--fullscreen");
     say("display: fullscreen, the game renders at " + std::to_string(w) + "x" + std::to_string(h));
   } else {
+    // The window's size and scale, fullscreen or not. The runtime's wayland
+    // backend is patched (runtime/weston/) to treat --fullscreen as the state
+    // the window starts in: it keeps the output at the game's size and scales
+    // it by the largest whole number that fits the host's screen, and Alt+F11
+    // or Ctrl+Alt+F goes back to exactly this window. Stock Weston ignores
+    // these with --fullscreen and puts the game in a corner at 1x.
+    const uint32_t ws = opt.window_scale ? opt.window_scale : s;
     wargs.push_back("--width=" + std::to_string(w));
     wargs.push_back("--height=" + std::to_string(h));
-    wargs.push_back("--scale=" + std::to_string(s));
-    say("display: " + std::to_string(w) + "x" + std::to_string(h) + " at " + std::to_string(s) +
-        "x -> " + std::to_string(w * s) + "x" + std::to_string(h * s) + " window");
+    wargs.push_back("--scale=" + std::to_string(ws));
+    if (opt.fullscreen) {
+      wargs.push_back("--fullscreen");
+      say("display: fullscreen, the game renders at " + std::to_string(w) + "x" +
+          std::to_string(h) + ", at " + std::to_string(ws) + "x as a window");
+    } else {
+      say("display: " + std::to_string(w) + "x" + std::to_string(h) + " at " + std::to_string(ws) +
+          "x -> " + std::to_string(w * ws) + "x" + std::to_string(h * ws) + " window");
+    }
+    // Capture is a promise only a game session makes, so only it hears about
+    // the click and Ctrl+Alt.
+    if (wayland_host)
+      say(pointer_capture ? "keys: Alt+F11 fullscreen, click to capture the mouse, Ctrl+Alt frees it"
+                          : "keys: Alt+F11 fullscreen");
   }
 
   fs::path weston = rt::which(e, "weston");
@@ -153,6 +208,22 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
   fs::remove(weston_log, ec);
   rt::Env wenv = wine_env;
   wenv.set("WESTON_CONFIG_FILE", (home / ".config" / "weston.ini").string());
+  if (!opt.headless && wayland_host) {
+    // What the patched wayland backend needs to know (runtime/weston/): the
+    // game's screen, which fullscreen letterboxes, and the window's scale,
+    // which it restores. Only the wayland backend is patched; an X11 host's
+    // Weston runs the stock x11 backend, which has no use for them.
+    const uint32_t ws = opt.window_scale ? opt.window_scale : s;
+    wenv.set("KRETRO_WESTON_GAME", std::to_string(w) + "x" + std::to_string(h));
+    wenv.set("KRETRO_WESTON_WINDOW_SCALE", std::to_string(ws));
+    // A click locks the host pointer to the window, so the game's pointer
+    // stops at its edges and the game gets every movement. Somebody for whom
+    // that is wrong - a desktop that refuses pointer locks, a tablet - sets
+    // KRETRO_WESTON_CAPTURE=0 and it is left as they set it. Set either way,
+    // because Weston inherits kretro's environment: an installer must not be
+    // captured just because the person exported KRETRO_WESTON_CAPTURE=1.
+    wenv.set("KRETRO_WESTON_CAPTURE", pointer_capture ? "1" : "0");
+  }
 
   pid_t wpid = kg::fork_tied(SIGTERM);
   if (wpid < 0) throw std::runtime_error("cannot fork");
@@ -179,7 +250,7 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
     std::stringstream ss; ss << log.rdbuf();
     throw std::runtime_error("Weston did not start:\n" + ss.str().substr(0, 2000));
   }
-  return Weston{std::move(child), socket};
+  return Weston{std::move(claim), std::move(child), socket};
 }
 
 // The first X display number from :8 up that nobody has a socket for.
@@ -250,6 +321,9 @@ void log_gl_renderer(const fs::path& weston_log, const std::function<void(const 
   }
 }
 
+// How long one photograph of the nested screen may take.
+constexpr int kCaptureTimeoutSec = 5;
+
 // A helper that photographs the nested screen while the game runs. The first
 // stable frame becomes the game's tile art - unless an install left a
 // stand-in there, which the first play replaces; the most recent one is what
@@ -258,8 +332,9 @@ void log_gl_renderer(const fs::path& weston_log, const std::function<void(const 
 // compositor it is drawing into.
 //
 // The child is forked and never execs, and takes a session of its own, so it
-// is ended with SIGKILL to its whole group. The frames directory is made
-// whether or not there is anything to capture.
+// is ended with SIGKILL to its whole group - the screenshooter it may be
+// waiting on with it - and the session's end never waits for a photograph.
+// The frames directory is made whether or not there is anything to capture.
 ScopedChild start_frame_capture(const rt::Env& e, const rt::Env& wine_env, const std::string& socket,
                                 const CompositorOptions& opt) {
   std::error_code ec;
@@ -282,6 +357,11 @@ ScopedChild start_frame_capture(const rt::Env& e, const rt::Env& wine_env, const
           ProcOptions po2;
           po2.capture = true;
           po2.cwd = scratch.string();
+          // weston-screenshooter waits for a frame, and a host that has
+          // stopped drawing the window - minimised, on another workspace -
+          // sends none. A photograph that does not come in seconds is not
+          // coming; the next one is a minute away.
+          po2.timeout_sec = kCaptureTimeoutSec;
           if (!rt::run(se, shooter, {}, po2).ok()) continue;
           for (const fs::directory_entry& de : fs::directory_iterator(scratch, ec)) {
             if (de.path().extension() != ".png") continue;

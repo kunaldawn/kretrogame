@@ -58,6 +58,17 @@ on glibc and musl systems alike. The app then starts everything else from the
 runtime: Weston, Xwayland, Wine, the DwarFS mounts of games, and the gamepad
 helper, which is the app itself run again through `KRETRO_APP`.
 
+A session's Weston listens on `$XDG_RUNTIME_DIR/kretro-<id>`, or on
+`kretro-<id>-2`, `-3` and so on when a live compositor already has that name
+(the same game played from another state directory, or by a player and by
+kretro at once). libwayland holds an flock on `<socket>.lock` for as long as
+its compositor lives, so `start_weston` removes a socket and lock only when
+nobody holds that lock: those were left by a Weston that was killed. That
+lock is only taken once Weston is up, so before looking at a name
+`session::claim_socket_name` takes an flock of kretro's own on
+`<socket>.kretro` and holds it until the compositor is gone; two sessions
+starting at once, in one process or two, can then never pick the same name.
+
 ### The fallback ladder
 
 Each step prefers the cheaper way and falls back when the machine refuses it:
@@ -112,6 +123,8 @@ on the app's behalf.
 | `KRETRO_MANIFESTS` | user, tests | `install` manifest search | An extra manifest directory, searched first. |
 | `KRETRO_DISC_DB` | user | `disc` database | An extra known-disc list, searched first. |
 | `KRETRO_UI_SCALE` | user, screenshot tools | `gui::forced_ui_scale` (kretro and the player) | An absolute UI scale, 0.5 to 4, in place of the one worked out from the window's size and the screen's density. Ctrl +, Ctrl - and Ctrl 0 still zoom on top of it. |
+| `KRETRO_WESTON_GAME`, `KRETRO_WESTON_WINDOW_SCALE` | `session` compositor (`start_weston`), on a Wayland host | the runtime's patched Weston wayland backend | The game's screen as `WxH`, and its scale as a window. With them fullscreen is a whole-number letterbox of that screen and windowed is exactly that size; see [Fullscreen and the mouse](#fullscreen-and-the-mouse). |
+| `KRETRO_WESTON_CAPTURE` | `session` compositor: for a game session (`CompositorOptions::pointer_capture`, set by play alone) the user's value, or `1` when unset; `0` for every other session (an installer, the stage probe); user | the runtime's patched Weston wayland backend | `1`: a click locks the host pointer to the game until Ctrl+Alt. Anything else leaves the pointer free. |
 | `KRETRO_REDUCE_MOTION` | user, screenshot tools | `gui::reduce_motion` (kretro and the player) | `1` turns motion off: the page fade-in, focus glides, scrolling, the carousels' easing, dialog fades, the hero band's fade-in and its cross-fade between games snap to where they are going, and the blinking cursors are solid. |
 
 `bundle::preview_env` removes every `KRETRO_*` variable before it starts a
@@ -181,9 +194,15 @@ depend on link order.
   anything asks where a game lives.
 - **The session's signal handlers.** `session::detail::MountInterruptGuard`
   installs handlers for SIGINT, SIGTERM and SIGHUP before the first mount and
-  points `detail::g_active` at the session's layers. The handlers are never
-  restored. A signal after the session still runs `release_on_signal`, which
-  exits with 128 + the signal.
+  points `detail::g_active` at the session's layers. The handler,
+  `detail::wake_on_signal`, only writes the signal into a self-pipe (a
+  handler may not fork or allocate, and the window's thread goes on running
+  while a session plays); a thread the guard starts reads it, runs
+  fusermount3 on what is mounted and exits with 128 + the signal. Its
+  destructor closes the layers, clears `g_active`, puts back the handlers it
+  replaced and stops the thread, so after a session the shelf and the
+  launcher answer SIGTERM with SDL's quit again. A fork that has not reached
+  its exec yet has the handler without the thread, and simply exits.
 - **The bootstrap's static buffers.** `boot_runtime_dir` and `boot_cache_dir`
   return pointers to static buffers that callers keep. The bootstrap is
   single-threaded and execs away, so this is safe.
@@ -214,12 +233,24 @@ The programs are single-threaded except for these threads:
   `on_pgid` fire on the thread that called `run_in_compositor`. During an
   install that is the wizard's job thread. The UI thread then opens its own
   X connection to the display; no Xlib connection is shared between threads.
+- **The session's signal thread** (`MountInterruptGuard`) lives as long as
+  the session holds mounts, and does nothing until a signal arrives. It and
+  the guard's destructor take one mutex around the mounts.
 - **The preview** (`bundle::Preview`) starts the player in its own process
   group and reads its output through a non-blocking pipe. `poll` is called
   from the UI thread and never blocks.
-- **Playing is synchronous.** `ShelfContext::play` and the launcher's play
-  call `session::play` inside a frame, with the window hidden until the game
-  exits. The event loop does not run meanwhile.
+- **Playing runs on the job worker.** `ShelfContext::play` and the launcher's
+  `play_now` run `session::play` (the launcher through `Player::play`) on
+  their `Job`, and the window keeps drawing: the shelf's job modal shows each
+  line the session says (`Hooks::say`), the launcher's working modal the
+  newest one. `Hooks::screen_up` fires on the worker once the nested
+  Xwayland answers; it only sets an atomic flag, and the UI thread hides the
+  window at its next frame (`hide_for_game`), since SDL's window calls are
+  its to make. The window is shown again when the job has finished
+  (`ShelfContext::after_play`, `LauncherContext::after_play`). A hidden
+  window's event loop still drains events, but passes on only a quit, and
+  sleeps 50 ms a frame. The shelf's stop button sets the job's cancel flag,
+  which `Hooks::stop_requested` reads between steps.
 
 ## Playing a game
 
@@ -253,6 +284,9 @@ The ordering constraints:
    explicit choice wins over the backend's.
 8. A dry run returns after every prefix write and before anything is
    launched.
+9. `Hooks::stop_requested` is asked before the prefix is touched, after it is
+   ready and before the game starts, never inside a step, so a stop never
+   leaves a half-made prefix.
 
 The lock, the pack, the layers and the guard are locals declared in that
 order, so the mounts are closed before the lock is released.
@@ -290,7 +324,74 @@ monitor), so asking SDL's x11 driver there would double the scale.
 `config::compute_geometry` gives the fullscreen modes (Fit, Native) the whole
 panel and a windowed Integer scale only the work area, so the window is not
 squeezed by the window manager. A work area of zero means the whole panel.
+On a Wayland host the nested Weston decorates its own window (a 27 px title
+bar and 6 px borders, from `shared/cairo-util.c`), so the window the host
+places is the game plus 12 x 33 px; `config::weston_window_frame` holds those
+numbers, the callers put them in `Panel::frame`, and the windowed scale (and a
+fullscreen start's `window_scale`) fits the game plus the frame into the work
+area. Fullscreen has no frame, and an X11 host's window manager draws its own
+decoration outside the work area it reports.
 Only the first display is measured.
+
+### Fullscreen and the mouse
+
+The game's screen is a rootful Xwayland inside a nested Weston, and on a
+Wayland host that Weston is a client of the host through its wayland backend.
+That backend is the only program in the chain that can lock the host pointer
+or make the host window fullscreen, so both are done there, in two patches to
+Weston 14.0.2's `wayland-backend.so` (`runtime/weston/*.patch`, built by
+`runtime/Dockerfile.runtime`). `start_weston` tells it about the game through
+its environment (see the table above) and always passes `--width`, `--height`
+and `--scale`, with `--fullscreen` only as the state the window starts in.
+
+- **Every absolute motion also carries its relative step.** A game that warps
+  the X pointer (most do, once a match starts) makes Xwayland lock the nested
+  pointer and move the X pointer by relative motion only. The stock backend
+  passed on absolute motion alone, so the game's pointer froze where it was
+  warped to.
+- **A click captures the pointer.** The click is not passed on; the backend
+  takes a one-shot `zwp_locked_pointer_v1` on the host and from then on drives
+  the nested pointer by the host's relative motion divided by the output
+  scale. Weston clamps that to its output, so the pointer stops at the game's
+  edges. **Ctrl+Alt**, pressed and released with nothing in between, lets go
+  and asks the host to put its cursor where the relative motion took the
+  pointer since the click: the backend adds that motion up itself, clamped to
+  the output, because the nested pointer is no guide while Xwayland holds its
+  own lock to emulate a warp (it stays at the warp point). For a game that
+  keeps warping to the centre, that is where the mouse was moved to rather
+  than where the game draws its cursor. The host ending the lock (another
+  window taking the focus) or the keyboard leaving lets go too, and the next
+  click captures again. The chord is watched in the backend rather than bound
+  in the compositor, so the game still sees Ctrl and Alt. While captured the
+  window title says how to get out, including after a fullscreen toggle makes
+  the frame again. Capture is for games only: `start_weston` sets
+  `KRETRO_WESTON_CAPTURE=1` only when `CompositorOptions::pointer_capture` is
+  set, which play alone does, and `0` otherwise, so an installer or winecfg in
+  a window is an ordinary window and gets its first click; the session's
+  "keys:" line mentions the capture only when it is on.
+  `KRETRO_WESTON_CAPTURE=0` in the environment turns capture off.
+- **Alt+F11** (or Weston's own Ctrl+Alt+F) toggles fullscreen on the window
+  with the keyboard. Fullscreen keeps the nested output at the game's size and
+  sets its scale to the largest whole number that fits the size the host
+  gives (`config::letterbox_scale` is the same sum); the host centres the
+  smaller surface on black, as xdg-shell's `set_fullscreen` describes. Going
+  back restores the game size times `Geometry::window_scale` with the frame,
+  and sizes the host proposes for the window are ignored, so it returns
+  exactly as it was. F11 alone is the game's, and Alt+Enter is what Windows
+  games handle themselves. The host's own fullscreen (its key binding or
+  window menu) is followed the same way: a configure whose FULLSCREEN state
+  differs from the backend's takes the same frame and scale steps as the
+  toggle, so the toggle's state stays true. A configure that disagrees while
+  the backend's own request is still unanswered is one sent before it, and is
+  ignored; a request is only counted as unanswered when it changes the state
+  the host last reported, since a host need not answer a no-op.
+
+A fullscreen start keeps `window_scale` (the work-area scale) for the way
+back, while `scale` is what fullscreen will show at. Without
+`WESTON_DATA_DIR` (set by `rt::make`) Weston cannot draw its frame; the
+patched backend still toggles, as an undecorated window. An X11 host's Weston
+runs the stock x11 backend: none of this applies there, and `--fullscreen` is
+passed alone as before.
 
 ### Getting the prefix ready without a display
 
@@ -315,6 +416,23 @@ runtime's prefix template is built the same way. The environment the game and
 Weston get (`PlayState::we`) keeps the host's display, so only copies are
 blanked.
 
+`kg::run` (`src/util/proc.cpp`), which every one of these goes through,
+returns when the program it started has exited and the pipe has nothing more
+to say: once the program is reaped the pipe is read until it ends, or until
+it is empty and a grace (`ProcOptions::grace_ms`, 100 ms) is over. Output
+already in the pipe is never cut, however late it is read; an earlier version
+stopped 100 ms after the exit whatever was left, and 7z -so feeding a hash
+could come back short and ok. It used to read the output to its end,
+and every process a Wine command starts (wineserver, services, winedevice,
+plugplay, svchost, explorer, rpcss) inherits that output, so each command took
+as long as Wine's shutdown, about 4.5 s, and would have waited forever for one
+that stayed. The pipe is made close-on-exec (the child clears the flag on its
+own 1 and 2 after the dup2, which does nothing when the pipe already landed
+there), and `timeout_sec` now covers the whole call, the read included. A ready prefix now gets ready in about 2 s
+rather than 19 s, and a fresh one from the template in about 7 s rather than
+41 s. The lingering server exits by itself a few seconds later and writes the
+registry as it goes; `wineserver -k` makes it write the registry too.
+
 `launch` stops the prefix's wineserver (`wineserver -k`, about 0.1 s) before
 the game starts, so the game gets a server of its own whose processes,
 explorer's desktop included, all start on the nested display. `-w` would wait
@@ -326,8 +444,8 @@ about three seconds for the lingering server instead.
 |---|---|
 | `kretro play` (`src/cli/play.cpp`) | `id`, the display flags, the panel and its work area (`gui::desktop_size`), `backend.dgvoodoo`, `record`, `note`, `dry_run` |
 | `kretro compare` | `id`, and per run `backend.wined3d_renderer`, `stop_after` and `capture_to` |
-| the shelf (`ShelfContext::play`) | `id`, the panel and its work area |
-| the player (`player::Player::play`) | `id`, `source` (the pack's range in the player file), `held_lock`, the game's display settings, `fullscreen`, the panel, `dry_run`, `backend.for_exe`, `game_drive` and `hooks.after_prefix` |
+| the shelf (`ShelfContext::play`) | `id`, the panel and its work area, `hooks.say`, `hooks.screen_up`, `hooks.stop_requested` |
+| the player (`player::Player::play`) | `id`, `source` (the pack's range in the player file), `held_lock`, the game's display settings, `fullscreen`, the panel, `dry_run`, `backend.for_exe`, `game_drive`, `hooks.after_prefix`, and from the launcher `hooks.say` and `hooks.screen_up` |
 | the tests | `id`, `source`, `dry_run` and a fixed `backend.fixed` |
 
 ## The GUI: pages, hosts and jobs
@@ -455,6 +573,13 @@ Xwayland, SDL and GStreamer, and a prefix template made once at build time.
   with everything in `runtime/player-prune.txt` removed, packed with
   `mkdwarfs --categorize`. `PLAYER_DLL_WHITELIST=1` additionally keeps only
   the Wine DLLs in `runtime/player-keep-dlls.txt`.
+
+Weston's wayland backend is not the packaged one. A first build stage fetches
+upstream's weston-14.0.2 tarball (sha256-pinned, the same as Debian's orig
+tarball), applies `runtime/weston/*.patch`, builds `wayland-backend.so` alone
+and copies it over Ubuntu's. The module uses libweston's internal ABI, so the
+final stage stops the build unless the packaged Weston is that same version;
+`RUNTIME` records it as `weston 14.0.2+kretro (<patches>)`.
 
 Both carry the same Wine and graphics stack, so what an author test-plays in
 kretro is what a player runs. The only path the bootstrap relies on inside

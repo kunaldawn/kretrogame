@@ -128,6 +128,9 @@ class GamePage : public Page {
   std::vector<std::string> gens_;
   // What the Uninstall? question says goes, measured as it came up.
   uint64_t prefix_bytes_ = 0, save_bytes_ = 0;
+  // An uninstall reads the collection again, and that replaces the entry
+  // draw() is still drawing from; so it waits for the end of the frame.
+  bool reload_after_draw_ = false;
 };
 
 // A .kgpack, what it is, and taking it in.

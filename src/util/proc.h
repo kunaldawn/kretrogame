@@ -19,6 +19,10 @@ struct ProcOptions {
   std::string cwd;
   bool capture = true;   // false lets the child use our terminal
   int timeout_sec = 0;   // for the whole call; 0 means wait indefinitely
+  // Once the program has exited, how long output is still waited for from
+  // what it left running. Output already in the pipe is read whatever this
+  // is; this is only how long a pipe with nothing in it is waited on.
+  int grace_ms = 100;
 };
 
 // argv[0] is the program path; it is executed directly, not through a shell,

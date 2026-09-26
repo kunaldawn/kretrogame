@@ -163,6 +163,43 @@ static void test_geometry_unknown_panel() {
   CHECK(!g.fullscreen);
 }
 
+// The scale fullscreen shows a game at, which the nested Weston's own sum
+// has to match.
+static void test_letterbox_scale() {
+  CHECK_EQ(config::letterbox_scale(1024, 768, 3072, 1728), 2u);
+  CHECK_EQ(config::letterbox_scale(1024, 768, 2560, 1600), 2u);
+  CHECK_EQ(config::letterbox_scale(1024, 768, 1920, 1080), 1u);
+  CHECK_EQ(config::letterbox_scale(512, 384, 2560, 1600), 4u);
+  CHECK_EQ(config::letterbox_scale(640, 480, 3840, 2160), 4u);
+  // Larger than the screen still shows, at 1, cropped by the host.
+  CHECK_EQ(config::letterbox_scale(2560, 1440, 1280, 720), 1u);
+  CHECK_EQ(config::letterbox_scale(0, 0, 1920, 1080), 1u);
+  CHECK_EQ(config::letterbox_scale(640, 480, 0, 0), 1u);
+
+  // A fullscreen start keeps the window scale for the toggle, fitted to the
+  // work area rather than the panel.
+  config::Display d;
+  d.mode = config::ScaleMode::Fit;
+  config::Geometry g = config::compute_geometry(640, 480, config::Panel{1920, 1440, 1920, 1400}, d);
+  CHECK_EQ(g.scale, 3u);
+  CHECK_EQ(g.window_scale, 2u);
+  CHECK(g.fullscreen);
+  // Unknown panel: nothing assumed either way.
+  g = config::compute_geometry(640, 480, config::Panel{}, d);
+  CHECK_EQ(g.window_scale, 1u);
+  // Windowed, the window scale is the scale.
+  d.mode = config::ScaleMode::Integer;
+  d.scale = 0;
+  g = config::compute_geometry(1024, 768, config::Panel{3072, 1728, 3017, 1696}, d);
+  CHECK_EQ(g.scale, 2u);
+  CHECK_EQ(g.window_scale, 2u);
+  d.scale = 1;
+  CHECK_EQ(config::compute_geometry(1024, 768, config::Panel{3072, 1728, 3017, 1696}, d).window_scale, 1u);
+  // Native's desktop is the panel; as a window it is that at 1.
+  d.mode = config::ScaleMode::Native;
+  CHECK_EQ(config::compute_geometry(1024, 768, config::Panel{3072, 1728, 3017, 1696}, d).window_scale, 1u);
+}
+
 // This host's panel under a Wayland desktop at 125%: 3072x1728 logical, and a
 // work area of 3017x1696 once the top bar and a fixed dock are taken off.
 static void test_geometry_work_area() {
@@ -207,6 +244,49 @@ static void test_geometry_work_area() {
   // window twice the size of the screen. Kept to show what the units were.
   d.mode = config::ScaleMode::Integer;
   CHECK_EQ(config::compute_geometry(1024, 768, 6144, 3456, d).scale, 4u);
+}
+
+// On a Wayland host the nested Weston draws a frame around the game's window,
+// and the window the host places is the game plus that frame. 320x240 at 7 is
+// 1680 lines, which fits the 1696 of this work area; with the title bar and
+// borders the window is 1713 and hangs off the bottom. The frame has to come
+// off the work area before the scale is chosen.
+static void test_geometry_window_frame() {
+  const config::WindowFrame frame = config::weston_window_frame(true);
+  CHECK_EQ(frame.w, 12u);  // 6 px borders either side
+  CHECK_EQ(frame.h, 33u);  // a 27 px title bar and the 6 px border below
+  const config::WindowFrame none = config::weston_window_frame(false);
+  CHECK_EQ(none.w, 0u);
+  CHECK_EQ(none.h, 0u);
+
+  config::Display d;
+  d.mode = config::ScaleMode::Integer;
+  d.scale = 0;
+  const config::Panel bare{3072, 1728, 3017, 1696};
+  const config::Panel framed{3072, 1728, 3017, 1696, frame};
+  CHECK_EQ(config::compute_geometry(320, 240, bare, d).scale, 7u);
+  config::Geometry g = config::compute_geometry(320, 240, framed, d);
+  CHECK_EQ(g.scale, 6u);
+  CHECK(g.logical_h * g.scale + frame.h <= framed.usable_h);
+  CHECK(g.logical_w * g.scale + frame.w <= framed.usable_w);
+  // An explicit 7 is clamped the same way.
+  d.scale = 7;
+  CHECK_EQ(config::compute_geometry(320, 240, framed, d).scale, 6u);
+
+  // A fullscreen start has no frame, but the window it goes back to does.
+  d.mode = config::ScaleMode::Fit;
+  d.scale = 0;
+  g = config::compute_geometry(320, 240, framed, d);
+  CHECK_EQ(g.scale, 7u);
+  CHECK_EQ(g.window_scale, 6u);
+
+  // Where the frame costs nothing the scale stays: 1024x768 at 2 is 1536 +
+  // 33 lines, well inside.
+  d.mode = config::ScaleMode::Integer;
+  CHECK_EQ(config::compute_geometry(1024, 768, framed, d).scale, 2u);
+  // A frame bigger than the work area still gives a scale of 1, not "unknown".
+  CHECK_EQ(config::compute_geometry(320, 240, config::Panel{1920, 1080, 10, 10, frame}, d).scale,
+           1u);
 }
 
 // The exact text config::save writes, pinned so that moving the code that
@@ -367,6 +447,8 @@ int main() {
     test_geometry_native();
     test_geometry_unknown_panel();
     test_geometry_work_area();
+    test_letterbox_scale();
+    test_geometry_window_frame();
     test_text_helpers();
     test_formatters();
     test_case_insensitive_paths(tmp);

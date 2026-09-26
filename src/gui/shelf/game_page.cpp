@@ -290,6 +290,11 @@ void GamePage::draw() {
   }
 
   end_page_scroll();
+  // Past the last use of `e`, which points into the list this replaces.
+  if (reload_after_draw_) {
+    reload_after_draw_ = false;
+    ctx_.reload();
+  }
 }
 
 // A game can be reinstalled from its disc in minutes; a save cannot be
@@ -345,7 +350,7 @@ void GamePage::uninstall_modal(const Entry& e) {
     fs::remove_all(prefix, ec);
     if (also_saves_) fs::remove_all(saves, ec);
     ctx_.status = e.name + " uninstalled";
-    ctx_.reload();
+    reload_after_draw_ = true;
     ctx_.go(Screen::Shelf);
     ImGui::CloseCurrentPopup();
     dialog_end();

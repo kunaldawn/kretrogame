@@ -156,12 +156,32 @@ All notable changes to kretrogame are recorded here. The format follows
 
 ### Fixed
 
+- In a game running on a Wayland desktop the mouse pointer froze once a match
+  started: the game warped the pointer, Xwayland then moved it by relative
+  motion only, and the nested Weston passed on absolute motion alone. The
+  runtime's Weston wayland backend is now patched (`runtime/weston/`) so
+  every motion also carries its relative step.
+- A click in the game now captures the mouse: the pointer stays inside the
+  game's screen and the game gets every movement. Ctrl+Alt, pressed and
+  released alone, frees it, with the host cursor where the mouse was moved to;
+  switching to another window frees it too, and the next click captures
+  again. `KRETRO_WESTON_CAPTURE=0` turns this off. Only games capture: an
+  installer shown in a window is an ordinary window.
+- Alt+F11 (and Ctrl+Alt+F) toggles fullscreen during play: the game is shown
+  centred on black at the largest whole-number scale that fits the screen,
+  and comes back to exactly the window it was. A game set to start fullscreen
+  now does so at that scale rather than at 1x in the corner, and can be put in
+  a window the same way. The desktop's own fullscreen binding or menu is
+  followed the same way. Weston's window also has its title bar again
+  (`WESTON_DATA_DIR` points into the runtime), and the session says which
+  keys do what.
 - A windowed game on a Wayland desktop with a fractional scale came up at
   twice the size the screen could show, squeezed by the desktop into its work
   area. The panel is now measured in the units the nested Weston sizes its
   window in (the desktop's logical size, not the scaled-up Xwayland root),
   and a windowed game's whole-number scale fits the work area, the desktop
-  less its top bar and dock. Fullscreen still uses the whole panel.
+  less its top bar and dock, with room for the window's own title bar and
+  borders. Fullscreen still uses the whole panel.
   `kretro display` shows the work area when it is smaller.
 - A game started from kretro's shelf was always shown at 1x in a window: the
   shelf never told the session the panel's size. It now measures it as the
@@ -174,3 +194,45 @@ All notable changes to kretrogame are recorded here. The format follows
   (wineboot, winecfg, the registry imports and `reg add`s, the CD-ROM drive,
   the player's prefix upgrade and author's key) now runs with no display, and
   the game starts on a fresh wineserver.
+- Pressing Play on the shelf or in a player's launcher hid the window at
+  once and showed nothing until the game's screen came up, which on a new
+  prefix took a minute and looked like a crash; closing the terminal or
+  pressing Ctrl-C in that time ended kretro. The session now runs on the
+  window's worker, with what it is doing in the job's modal ("preparing the
+  Wine prefix", "windows version", "restoring..."), and the window is hidden
+  only once the game's screen is up. The shelf's stop button ends the session
+  between steps.
+- Each Wine command while a game was made ready waited for Wine's background
+  services to exit, about 4.5 seconds apiece, because they inherited its
+  output: getting a ready prefix ready took 19 seconds, a new one 41. Running
+  a program now returns when that program exits, and its time limit covers
+  the whole call. The same steps take about 2 and 7 seconds.
+- After a game, kretro's shelf and a player's launcher no longer answered
+  SIGTERM or Ctrl-C by exiting with 130 or 143 on the spot: a session now puts
+  back the signal handlers it replaced.
+- After a game played from the shelf's game page, its status line could read
+  `std::bad_alloc`: the page went on using the game's entry after the
+  collection had been read again. The page no longer reads the collection
+  again in the middle of drawing, and neither does its Uninstall button,
+  which did the same with the game it had just removed.
+- Two sessions of the same game, from two state directories, no longer share
+  one Wayland socket: the second one used to delete the first's, taking its
+  display away from everything that looked it up by name. A socket whose
+  compositor is alive is left alone, and the new session takes the next name.
+  Two sessions starting at the same moment no longer both take the same free
+  name: each claims its name with a lock of its own before looking.
+- Running a program could return part of its output and report success: what
+  was still in the pipe 100 ms after the program exited was dropped, which on
+  a busy machine could cut short the 7z output a disc member's hash is taken
+  over. Output already written is now always read to the end; only processes
+  the program left behind with nothing to say are not waited for.
+- A program run by kretro from a process whose stdout or stderr was closed
+  started with that output closed too, and said nothing.
+- Ctrl-C, SIGTERM or SIGHUP during a game played from the shelf or a
+  launcher could hang instead of releasing the game's mounts: the signal
+  handler started fusermount3 itself, which is not safe while the window's
+  thread is running. The handler now only wakes a thread that does it; the
+  exit status is still 128 + the signal.
+- Taking the journal's picture of a game could hang for the rest of the
+  session when the host stopped drawing the window, so no later picture was
+  taken. Each picture now gives up after 5 seconds.

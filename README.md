@@ -323,6 +323,17 @@ outright, from 0.5 to 4 (for example `KRETRO_UI_SCALE=1.5 ./classics.run`).
 
 ## Graphics and display
 
+While a game runs on a Wayland desktop:
+
+- a **click** in the game captures the mouse, so the pointer stays inside the
+  game and the game sees every movement; **Ctrl+Alt**, pressed and released on
+  its own, frees it, and so does switching to another window;
+- **Alt+F11** (or **Ctrl+Alt+F**) toggles fullscreen. Fullscreen shows the
+  game centred on black at the largest whole-number scale that fits, and the
+  window comes back exactly as it was.
+
+`KRETRO_WESTON_CAPTURE=0` turns the capture off.
+
 kretro selects a rendering path per game from the Direct3D or OpenGL libraries
 its executable imports, and from what the host supports. The author of a player
 can override the choice per game.
@@ -394,9 +405,9 @@ installed files. The Bundles page shows the exact size before building.
   similar schemes read the disc below the file system, which a directory-backed
   CD-ROM drive cannot provide. Such games install but may refuse to start.
   kretro warns about this when building the pack and the player.
-- **Relative mouse movement through the nested compositor is untested.**
-  First-person games that rely on unbounded mouse movement may not turn past
-  the window edge.
+- **Mouse capture needs a Wayland desktop.** On an X11 desktop the game's
+  window neither captures the pointer nor toggles fullscreen with Alt+F11;
+  it starts fullscreen or windowed as set, as before.
 - **Wine is not yet pruned.** The player runtime removes authoring tools but
   keeps all of Wine's libraries. A pruned build is available with
   `make runtime PLAYER_DLL_WHITELIST=1` but is off by default.
