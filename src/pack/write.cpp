@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "../util/bytes.h"
@@ -32,7 +33,7 @@ std::string zstd_compress(std::string_view in) {
 
 }  // namespace
 
-void write_pack(const fs::path& out, Meta meta, const WriteOptions& opt) {
+void write_pack(const fs::path& out, SetMeta meta, const WriteOptions& opt) {
   // Two passes over the body, and never a copy of it in memory.
   //
   // Pass one only measures: the hash and the length go into the metadata, and
@@ -64,7 +65,7 @@ void write_pack(const fs::path& out, Meta meta, const WriteOptions& opt) {
     h.body_off = align_up(h.meta_off + h.meta_len, kBodyAlign);
     h.body_len = meta.body.length;
   }
-  h.blake3_root = meta.tree.root();
+  h.blake3_root = meta.root();
 
   // The destination is usually a capsule this machine is already playing, and
   // fopen(out, "wb") empties it before the first byte of the replacement is

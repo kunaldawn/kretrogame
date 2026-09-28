@@ -31,16 +31,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// The bytes in the regular files under `dir`, and 0 when it is not there.
-uint64_t tree_bytes(const fs::path& dir) {
-  std::error_code ec;
-  uint64_t bytes = 0;
-  for (const auto& de : fs::recursive_directory_iterator(dir, ec)) {
-    if (de.is_regular_file(ec)) bytes += de.file_size(ec);
-  }
-  return bytes;
-}
-
 // A fact about the pack in a line of them, "files 5 · size 12 KB": the key
 // dim, the value in `colour`, a dot between it and the one before while they
 // share a line, and a new line when it would not fit.
@@ -72,7 +62,7 @@ void GamePage::draw() {
   PageWindow page(e.name.c_str(), "Esc back", ctx_.fonts.big());
 
   // Read when the page comes up, when the collection is read again (after a
-  // session, a build, an uninstall) and after a restore here, rather than on
+  // session, a build, an import) and after a restore here, rather than on
   // every frame: a long journal is a file read per session per frame.
   if (disk_.due(e.id + "\n" + std::to_string(ctx_.generation))) {
     journal_ = e.installed ? session::journal(e.id) : std::vector<session::Record>{};
@@ -127,12 +117,10 @@ void GamePage::draw() {
     } else {
       figure("played", "never");
     }
-    const char* const more[] = {"Timeline", "Settings", "Uninstall"};
-    const int pressed = action_bar_ghosts(more, 3);
+    const char* const more[] = {"Timeline", "Settings"};
+    const int pressed = action_bar_ghosts(more, 2);
     if (pressed == 0) ctx_.go(Screen::Timeline);
     if (pressed == 1) ctx_.go(Screen::Settings);
-    if (pressed == 2) confirm_uninstall_ = true;
-    uninstall_modal(e);
     action_bar_end();
     status_line();
     vgap(6);
@@ -181,40 +169,16 @@ void GamePage::draw() {
       section("pack");
       fact("files", std::to_string(e.files), kText, true);
       fact("size", human_size(e.tree_bytes), kText, false);
-      fact("packed to", human_size(e.pack_bytes), kText, false);
+      // The pack is the set's: games from one disc share it, and its size is
+      // theirs together.
+      fact(e.set_games > 1 ? "its set" : "packed to", human_size(e.pack_bytes), kText, false);
       ImGui::TextDisabled("one file");
       ImGui::SameLine();
       elided_text(e.pack.filename().string(), kCyan);
-      // The state Meta.discs has been able to describe since the format
-      // existed, finally said out loud. Play still works - most of these games
-      // only check for the disc when they start a new campaign or play their
-      // video - so this is a fact about the pack, not a refusal, and it sits
-      // with the other facts about the pack rather than beside the Play button.
-      if (!e.absent_discs.empty()) {
-        ImGui::Spacing();
-        if (e.flat_body) {
-          badge_line(BadgeKind::Warn,
-                     "Needs the original disc. This pack was made before packs carried "
-                     "their discs - rebuild it to include them.",
-                     kWarm);
-        } else if (e.absent_discs.size() == 1) {
-          badge_line(BadgeKind::Warn,
-                     "Needs the original disc: this pack names " + e.absent_discs[0] +
-                         " but does not carry it.",
-                     kWarm);
-        } else {
-          badge_line(BadgeKind::Warn,
-                     "Needs the original discs: this pack names " +
-                         std::to_string(e.absent_discs.size()) + " it does not carry.",
-                     kWarm);
-        }
-        // The discs under the sentence, lined up with it rather than the badge.
-        const float hang = ImGui::CalcTextSize("[WARN]").x + badge_gap();
-        ImGui::Indent(hang);
-        for (const std::string& d : e.absent_discs) ImGui::TextColored(kCyan, "%s", d.c_str());
-        ImGui::Unindent(hang);
+      if (e.set_games > 1) {
+        const size_t n = e.set_games - 1;
+        ImGui::TextDisabled("shares its discs with %zu other game%s", n, n == 1 ? "" : "s");
       }
-
       if (!e.last_note.empty()) {
         section("note");
         ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
@@ -290,76 +254,6 @@ void GamePage::draw() {
   }
 
   end_page_scroll();
-  // Past the last use of `e`, which points into the list this replaces.
-  if (reload_after_draw_) {
-    reload_after_draw_ = false;
-    ctx_.reload();
-  }
-}
-
-// A game can be reinstalled from its disc in minutes; a save cannot be
-// reinstalled at all. So the saves are kept unless you say otherwise, and the
-// dialog says what will be freed before it frees it.
-void GamePage::uninstall_modal(const Entry& e) {
-  const fs::path prefix = prefixes_dir() / e.id;
-  const fs::path saves = saves_dir() / e.id;
-  if (confirm_uninstall_) {
-    ImGui::OpenPopup("Uninstall?");
-    confirm_uninstall_ = false;
-    also_saves_ = false;
-    // What goes, measured once as the question comes up: a Wine prefix is
-    // thousands of files, and walking it on every frame the question stays
-    // up is a stall on every one of them. Nothing changes the two while it
-    // is up.
-    prefix_bytes_ = tree_bytes(prefix);
-    save_bytes_ = tree_bytes(saves);
-  }
-  // Headed with the question as its title; the popup's name is only its ID.
-  if (!dialog_begin("Uninstall?", 520, "Uninstall " + e.name + "?")) return;
-
-  std::error_code ec;
-  const uint64_t prefix_bytes = prefix_bytes_, save_bytes = save_bytes_;
-
-  // What goes, with the sizes in a column of their own so they line up.
-  if (ImGui::BeginTable("frees", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
-    const std::pair<const char*, uint64_t> rows[] = {{"the game", e.pack_bytes},
-                                                     {"its Wine prefix", prefix_bytes},
-                                                     {"saves and snapshots", save_bytes}};
-    float size_w = 0;
-    for (const auto& row : rows) size_w = std::max(size_w, ImGui::CalcTextSize(human_size(row.second).c_str()).x);
-    ImGui::TableSetupColumn("what", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthFixed, size_w);
-    for (const auto& [what, bytes] : rows) {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextDisabled("  %s", what);
-      ImGui::TableNextColumn();
-      const std::string size = human_size(bytes);
-      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
-                           ImGui::CalcTextSize(size.c_str()).x);
-      ImGui::TextUnformatted(size.c_str());
-    }
-    ImGui::EndTable();
-  }
-  ImGui::Spacing();
-  ImGui::Checkbox("delete the saves too", &also_saves_);
-  dialog_footer();
-  // The button that deletes things says so in the colour errors are said in.
-  if (dialog_button("Uninstall", DialogButton::Danger)) {
-    fs::remove(e.pack, ec);
-    fs::remove_all(prefix, ec);
-    if (also_saves_) fs::remove_all(saves, ec);
-    ctx_.status = e.name + " uninstalled";
-    reload_after_draw_ = true;
-    ctx_.go(Screen::Shelf);
-    ImGui::CloseCurrentPopup();
-    dialog_end();
-    return;
-  }
-  // Keeping it is what Escape and the pad's B answer, and where the focus
-  // starts, so a key pressed without reading deletes nothing.
-  if (dialog_button("Keep it", DialogButton::Secondary, true)) ImGui::CloseCurrentPopup();
-  dialog_end();
 }
 
 }  // namespace kg::gui::shelf

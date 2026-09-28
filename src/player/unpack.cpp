@@ -7,15 +7,12 @@
 namespace kg::player {
 namespace fs = std::filesystem;
 
-uint64_t unpacked_estimate(const Meta& m) {
-  uint64_t n = m.tree.total_bytes() + m.system.bytes;
-  bool carries_discs = false;
-  for (const Meta::Disc& d : m.discs) carries_discs = carries_discs || d.embedded;
-  // A carried disc's tree is about its image's size; the fingerprints are
-  // the only sizes the pack records for them.
-  if (carries_discs) {
-    for (const DiscFingerprint& f : m.recipe.fingerprints) n += f.size;
-  }
+uint64_t unpacked_estimate(const SetMeta& s) {
+  uint64_t n = 0;
+  for (const Meta& g : s.games) n += g.tree.total_bytes() + g.system.bytes;
+  // Each disc once, its tree and audio as the pack recorded them when it laid
+  // them out.
+  for (const Meta::Disc& d : s.discs) n += d.bytes;
   return n;
 }
 

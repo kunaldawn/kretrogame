@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
+#include <optional>
 
 #include "../../install/collection.h"
 #include "../../install/discs.h"
 #include "../../install/manifest.h"
+#include "../../install/share.h"
 #include "../../util/paths.h"
 
 namespace kg::gui {
@@ -16,26 +19,32 @@ std::vector<Entry> scan(const rt::Env& e) {
   std::error_code ec;
   ensure_state_dirs();
 
-  for (const fs::directory_entry& de : fs::directory_iterator(games_dir(), ec)) {
-    if (de.path().extension() != ".kgpack") continue;
-    Entry en;
-    try {
-      Pack p = Pack::open(de.path());
-      en.id = p.meta().id;
-      en.name = p.meta().name;
-      en.year = p.meta().year;
-      en.tree_bytes = p.meta().tree.total_bytes();
-      en.files = p.meta().tree.size();
-      en.flat_body = !p.meta().rooted();
-      for (const Meta::Disc& d : p.meta().discs) {
-        if (d.embedded) continue;
-        en.absent_discs.push_back(d.label.empty() ? d.ref : d.label);
+  // Each set opened once, however many of its games are on the shelf.
+  std::map<fs::path, std::optional<Pack>> packs;
+  for (const install::InstalledGame& g : install::installed_games()) {
+    auto it = packs.find(g.pack);
+    if (it == packs.end()) {
+      std::optional<Pack> p;
+      try {
+        p = Pack::open(g.pack);
+      } catch (const std::exception&) {
       }
-    } catch (const std::exception&) {
-      continue;
+      it = packs.emplace(g.pack, std::move(p)).first;
     }
-    en.pack = de.path();
-    en.pack_bytes = fs::file_size(de.path(), ec);
+    if (!it->second) continue;
+    const Pack& p = *it->second;
+    const Meta* m = p.set().find(g.id);
+    if (!m) continue;
+    Entry en;
+    en.id = m->id;
+    en.name = m->name;
+    en.year = m->year;
+    en.tree_bytes = m->tree.total_bytes();
+    en.files = m->tree.size();
+    en.set_id = p.set().set_id;
+    en.set_games = p.games().size();
+    en.pack = g.pack;
+    en.pack_bytes = fs::file_size(g.pack, ec);
 
     // Spelled out rather than through session::journal_dir and its
     // neighbours: this starts from saves_dir()/<id>, not game_saves_dir(id),

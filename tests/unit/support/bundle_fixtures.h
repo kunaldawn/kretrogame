@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "bundle/build.h"
 #include "pack/kgpack.h"
@@ -28,9 +29,10 @@ inline kg::Meta pack_meta(const std::filesystem::path& tmp, const std::string& i
   return m;
 }
 
-// A capsule with a body, as install writes one, at tmp/shelf/<id>.kgpack. The
-// body is not a DwarFS image; nothing here mounts it, and its hash is all that
-// is checked.
+// A capsule with a body, as install writes one, at tmp/shelf/<id>.kgpack: a
+// set of the one game, named as install names one whose game has no disc
+// (kg::set_id_for({}, id)). The body is not a DwarFS image; nothing here
+// mounts it, and its hash is all that is checked.
 inline std::filesystem::path make_pack(const std::filesystem::path& tmp, const std::string& id,
                                        size_t body_size = 20000) {
   std::filesystem::path body = tmp / (id + ".body");
@@ -39,7 +41,24 @@ inline std::filesystem::path make_pack(const std::filesystem::path& tmp, const s
   write_file(body, b);
   std::filesystem::path out = tmp / "shelf" / (id + ".kgpack");
   std::filesystem::create_directories(out.parent_path());
-  kg::write_pack(out, pack_meta(tmp, id), kg::WriteOptions{kg::PackKind::Game, body, false});
+  kg::write_pack(out, kg::set_of(pack_meta(tmp, id)), kg::WriteOptions{kg::PackKind::Game, body, false});
+  return out;
+}
+
+// Several games in one pack, as a disc holding them installs, at
+// tmp/shelf/<set_id>.kgpack. The body is filler, as make_pack's is.
+inline std::filesystem::path make_set(const std::filesystem::path& tmp, const std::string& set_id,
+                                      const std::vector<std::string>& ids, size_t body_size = 20000) {
+  kg::SetMeta s;
+  s.set_id = set_id;
+  for (const std::string& id : ids) s.games.push_back(pack_meta(tmp, id));
+  std::filesystem::path body = tmp / (set_id + ".body");
+  std::string b;
+  for (size_t i = 0; i < body_size; ++i) b.push_back(static_cast<char>('a' + (i * 5 + set_id.size()) % 26));
+  write_file(body, b);
+  std::filesystem::path out = tmp / "shelf" / (set_id + ".kgpack");
+  std::filesystem::create_directories(out.parent_path());
+  kg::write_pack(out, s, kg::WriteOptions{kg::PackKind::Game, body, false});
   return out;
 }
 

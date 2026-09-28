@@ -14,11 +14,12 @@
 namespace kg {
 
 inline constexpr char kPackMagic[7] = {'K', 'G', 'P', 'A', 'C', 'K', '\0'};
-// 1: a flat body - the DwarFS image is the game tree and nothing else.
-// 2: a rooted body - game/ , system/ , discs/<n>/ and registry.reg. See
-//    Meta::layout.
-inline constexpr uint8_t kContainerRevision = 2;
-inline constexpr uint8_t kOldestReadableRevision = 1;
+// 3: a media set - discs/<key>/ once each, and games/<id>/ for every game
+//    installed from them (see SetMeta). Revisions 1 (a flat body) and 2 (one
+//    game with its own copy of its discs) are no longer read: those games are
+//    installed again.
+inline constexpr uint8_t kContainerRevision = 3;
+inline constexpr uint8_t kOldestReadableRevision = 3;
 inline constexpr uint16_t kPackFormatVersion = 1;
 inline constexpr size_t kPackHeaderSize = 96;
 inline constexpr uint64_t kBodyAlign = 4096;  // keeps the body mmap-friendly

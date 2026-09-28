@@ -18,9 +18,9 @@ struct UnpackPlan {
   bool fits() const { return free >= need; }
 };
 
-// An upper estimate of a pack's unpacked size: the game tree, what the
-// installer put outside it, and each carried disc at its image's size.
-uint64_t unpacked_estimate(const Meta& m);
+// An upper estimate of a set's unpacked size: each game's tree and what its
+// installer put outside it, and each disc as the set laid it out.
+uint64_t unpacked_estimate(const SetMeta& s);
 // Free bytes on the filesystem that holds `p`, or its nearest ancestor that
 // exists.
 uint64_t free_bytes(const std::filesystem::path& p);

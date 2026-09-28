@@ -15,13 +15,13 @@
 namespace kg::session {
 
 struct Layers {
-  // The whole body: game/ , system/ , discs/<n>/ and registry.reg for a rooted
-  // pack, and the game tree itself for a flat one. This is the mountpoint;
-  // `base` is a path inside it, not a mount of its own.
+  // The whole body: games/<id>/ for each game of the set and discs/<key>/ for
+  // each disc. This is the mountpoint; `base` is a path inside it, not a mount
+  // of its own.
   //
   // Which of those exist varies and none of them is promised: a copy install
-  // has no system/, a pack built with the discs left out has no discs/. Every
-  // reader here looks before it reads.
+  // has no system/, an installer with no disc has no discs/. Every reader here
+  // looks before it reads.
   //
   // Mounting the image here rather than at `base` is what makes the discs
   // reachable at all, and it leaves the saves layer exactly as it was: had the
@@ -29,7 +29,7 @@ struct Layers {
   // the game made would have landed under upper/game/ and silently changed the
   // layout that live_dir, snapshot, restore and the saves export all assume.
   std::filesystem::path image;
-  std::filesystem::path base;    // the game, read-only: image/game when rooted
+  std::filesystem::path base;    // the game, read-only: image/games/<id>/game
   std::filesystem::path upper;   // where the game's writes land
   std::filesystem::path work;
   std::filesystem::path merged;  // what the game is given as its directory
@@ -61,7 +61,7 @@ struct Source {
   // for it, and a mount that fails anyway is NeedsUnpack rather than gigabytes
   // written without a word.
   bool may_unpack = true;
-  // Where an unpacked copy is, or goes: game_extract_dir(id) when empty. A
+  // Where an unpacked copy is, or goes: set_extract_dir(set) when empty. A
   // player unpacked with --extract-to somewhere roomier remembers where.
   std::filesystem::path extract_dir;
   // A directory laid out like the game's own whose files are put over the
@@ -81,14 +81,16 @@ class NeedsUnpack : public std::runtime_error {
 };
 
 // Mounts the pack's body straight out of the .kgpack at its offset - no copy,
-// no temporary file - and puts a writable layer over it, into `l` as it goes.
+// no temporary file - and puts a writable layer over game `id`'s tree in it,
+// into `l` as it goes.
 // `src`, when given, is where the pack came from and how it may be mounted;
 // the offsets are the pack's own plus pack.base().
 //
 // Each mount is marked in `l` from before it is attempted, so a caller that
 // hands `l` to a signal handler first has every mount released by it, however
 // far this got.
-void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const Source* src = nullptr);
+void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const std::string& id,
+                 const Source* src = nullptr);
 
 // Puts the runtime's fuse-overlayfs over `lower` at `merged`. Empty when it is
 // mounted; otherwise what went wrong, in fuse-overlayfs's words.

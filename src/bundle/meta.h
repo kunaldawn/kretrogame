@@ -34,6 +34,9 @@ struct GameMeta {
   std::string id;
   std::string name;
   uint32_t year = 0;
+  // The set the game plays from: the name of the table entry whose pack holds
+  // it. A disc of three games is one pack in the file, and three games name it.
+  std::string set;
   std::string cover;              // PNG bytes; empty for none
   std::string backend = "auto";   // auto | dxvk | wined3d-vk | wined3d-gl | cnc-ddraw
   bool needs_gpu = false;

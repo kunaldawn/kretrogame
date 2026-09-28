@@ -56,6 +56,7 @@ using kgtest::contains;
 using kgtest::flip_byte;
 using kgtest::make_base;
 using kgtest::make_pack;
+using kgtest::make_set;
 using kgtest::section;
 using kgtest::slurp;
 using kgtest::write_file;
@@ -153,7 +154,8 @@ static void test_bundle_layout() {
   CHECK_EQ(game_saves_dir("example"), st / "saves" / "example");
   CHECK_EQ(game_prefix_dir("example"), st / "prefixes" / "example");
   CHECK_EQ(game_mount_dir("example"), st / "saves" / "example");
-  CHECK_EQ(game_extract_dir("example"), st / "extracted" / "example");
+  // The unpacked copy is the set's, shared by every game of it.
+  CHECK_EQ(set_extract_dir("s-0123456789abcdef"), st / "extracted" / "s-0123456789abcdef");
 
   use_bundle_layout("classics");
   CHECK(bundle_layout());
@@ -173,10 +175,11 @@ static void test_bundle_layout() {
   // A fixed answer, so a build that changed how it is worked out would fail
   // here rather than orphan the mounts an older build left.
   CHECK_EQ(state_key("/home/kim/.local/share/classics"), std::string("f1ed8400"));
-  CHECK_EQ(game_extract_dir("example"),
-           fs::path(std::getenv("XDG_CACHE_HOME")) / "kretro" / ("classics-" + state_key(st)) / "example");
-  CHECK_EQ(session::extraction_stamp_file(game_extract_dir("example")),
-           fs::path(std::getenv("XDG_CACHE_HOME")) / "kretro" / ("classics-" + state_key(st)) / "example.stamp");
+  CHECK_EQ(set_extract_dir("s-0123456789abcdef"),
+           fs::path(std::getenv("XDG_CACHE_HOME")) / "kretro" / ("classics-" + state_key(st)) / "s-0123456789abcdef");
+  CHECK_EQ(session::extraction_stamp_file(set_extract_dir("s-0123456789abcdef")),
+           fs::path(std::getenv("XDG_CACHE_HOME")) / "kretro" / ("classics-" + state_key(st)) /
+               "s-0123456789abcdef.stamp");
   CHECK_EQ(session::lock_file("example"), st / "example" / "saves" / "lock");
   use_bundle_layout("");
   CHECK(!bundle_layout());
@@ -821,12 +824,90 @@ static fs::path make_player(const fs::path& tmp, const std::vector<std::string>&
     g.name = "The game " + id;
     g.year = 1999;
     g.display = "fit";
+    g.set = set_id_for({}, id);  // the one-game set make_pack writes
     m.games.push_back(g);
     packs.push_back(make_pack(tmp, id));
   }
   bundle::BaseSource bs;
   bs.path = base;
   return bundle::build_bundle(bs, m, packs, tmp / "classics.run").path;
+}
+
+// A player carrying sets of several games: each set once, as a disc of three
+// games is carried.
+static fs::path make_player_from_sets(const fs::path& tmp,
+                                      const std::vector<std::pair<std::string, std::vector<std::string>>>& sets) {
+  fs::path base = make_base(tmp);
+  bundle::BundleMeta m;
+  m.id = "retro-sets";
+  m.title = "Retro Sets";
+  m.version = "1.0";
+  m.rights_acknowledged = true;
+  std::vector<fs::path> packs;
+  for (const auto& [set, ids] : sets) {
+    for (const std::string& id : ids) {
+      bundle::GameMeta g;
+      g.id = id;
+      g.name = "The game " + id;
+      g.set = set;
+      m.games.push_back(g);
+    }
+    packs.push_back(make_set(tmp, set, ids));
+  }
+  bundle::BaseSource bs;
+  bs.path = base;
+  return bundle::build_bundle(bs, m, packs, tmp / "sets.run").path;
+}
+
+// Review Focus 4 of the media-set work: a set is hashed once for all its
+// games, and a damaged set names the game asked for and spares the other set.
+static void test_player_sets(const fs::path& tmp) {
+  section("player: a set is checked once for all its games, and damage spares the other sets");
+  fs::path file = make_player_from_sets(tmp, {{"s-00000000000000aa", {"example-game-a", "example-game-b"}},
+                                              {"s-00000000000000bb", {"example-game-c"}}});
+  player::Bundle b = player::Bundle::open(file);
+  CHECK(b.pack("example-game-a") != nullptr);
+  CHECK_EQ(b.pack("example-game-a"), b.pack("example-game-b"));
+  CHECK(b.pack("example-game-a") != b.pack("example-game-c"));
+  CHECK(b.pack("no-such-game") == nullptr);
+  player::StateChoice st;
+  st.dir = state_dir();
+  player::Player p(b, rt::Env{}, st, gpu::Report{});
+  CHECK_EQ(p.open_pack("example-game-b").game("example-game-b").id, std::string("example-game-b"));
+  CHECK(!p.verified("example-game-b"));
+  p.verify("example-game-a");
+  CHECK(p.verified("example-game-b"));  // one hash, both games
+  CHECK(!p.verified("example-game-c"));
+
+  const bundle::Entry* e = b.pack("example-game-c");
+  flip_byte(file, b.toc.at(*e) + e->len / 2);
+  bool damaged = false;
+  try {
+    p.verify("example-game-c");
+  } catch (const player::Damaged& ex) {
+    damaged = true;
+    CHECK_EQ(ex.game(), std::string("example-game-c"));
+    CHECK(contains(ex.what(), "The game example-game-c is damaged"));
+  }
+  CHECK(damaged);
+  p.verify("example-game-a");  // the other set still plays
+
+  // Damage in the shared set names what else cannot play. Another set, so
+  // the first player's check of these games is not remembered for this one.
+  fs::path again = make_player_from_sets(tmp, {{"s-00000000000000cc", {"example-game-a", "example-game-b"}}});
+  player::Bundle b2 = player::Bundle::open(again);
+  const bundle::Entry* e2 = b2.pack("example-game-a");
+  flip_byte(again, b2.toc.at(*e2) + e2->len / 2);
+  player::StateChoice st2;
+  st2.dir = state_dir();
+  player::Player p2(b2, rt::Env{}, st2, gpu::Report{});
+  bool shared = false;
+  try {
+    p2.verify("example-game-a");
+  } catch (const player::Damaged& ex) {
+    shared = contains(ex.what(), "The game example-game-b");
+  }
+  CHECK(shared);
 }
 
 static void test_player_file(const fs::path& tmp) {
@@ -856,7 +937,7 @@ static void test_player_file(const fs::path& tmp) {
     CHECK(contains(ex.what(), "example, classic2"));
   }
   // A pack opened out of the file is the game it says it is.
-  CHECK_EQ(p.open_pack("classic2").meta().id, std::string("classic2"));
+  CHECK_EQ(p.open_pack("classic2").game("classic2").id, std::string("classic2"));
   CHECK(p.open_pack("classic2").base() == b.toc.at(*b.pack("classic2")));
 
   CHECK(!p.verified("example"));
@@ -892,7 +973,7 @@ static void test_player_file(const fs::path& tmp) {
   CHECK(!u.ready);
   CHECK(u.need >= p.open_pack("example").header().body_len);
   CHECK(u.free > 0);
-  CHECK_EQ(u.where, game_extract_dir("example"));
+  CHECK_EQ(u.where, set_extract_dir(p.open_pack("example").set().set_id));
 
   // --extract-to's copy is used while it is there; once it is deleted, as
   // --extract-to says undoes it, the game goes back to the cache rather than
@@ -902,7 +983,7 @@ static void test_player_file(const fs::path& tmp) {
   write_file(state_dir() / "example" / "unpacked-at", elsewhere.string() + "\n");
   CHECK_EQ(p.unpack_plan("example").where, elsewhere);
   fs::remove_all(tmp / "big-disk");
-  CHECK_EQ(p.unpack_plan("example").where, game_extract_dir("example"));
+  CHECK_EQ(p.unpack_plan("example").where, set_extract_dir(p.open_pack("example").set().set_id));
   fs::remove(state_dir() / "example" / "unpacked-at");
 
   // --extract-to ~/Games puts the game at ~/Games/<id>, and an id is the
@@ -911,8 +992,9 @@ static void test_player_file(const fs::path& tmp) {
   // unpacks, is filled. The DwarFS tool is a stand-in that unpacks one file.
   {
     fs::path tool = tmp / "fake-dwarfs";
-    write_file(tool, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
-               "mkdir -p \"$out\" && echo unpacked > \"$out/GAME.EXE\"\n");
+    write_file(tool,
+               "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+               "mkdir -p \"$out/games/example/game\" && echo unpacked > \"$out/games/example/game/GAME.EXE\"\n");
     fs::permissions(tool, fs::perms::owner_all);
     setenv("KRETRO_DWARFS", tool.c_str(), 1);
     fs::path mine = tmp / "Games" / "example";
@@ -931,15 +1013,15 @@ static void test_player_file(const fs::path& tmp) {
     fs::path empty = tmp / "Games" / "empty" / "example";
     fs::create_directories(empty);
     CHECK_EQ(p.unpack("example", empty), empty);
-    CHECK_EQ(slurp(empty / "GAME.EXE"), std::string("unpacked\n"));
+    CHECK_EQ(slurp(empty / "games" / "example" / "game" / "GAME.EXE"), std::string("unpacked\n"));
     Pack pk = p.open_pack("example");
-    const std::string stamp = session::extraction_stamp(pk.meta(), pk.header());
+    const std::string stamp = session::extraction_stamp(pk.games()[0], pk.header());
     CHECK(session::extraction_stamp_matches(session::extraction_stamp_file(empty), stamp));
     // Its own, again: replaced.
     write_file(empty / "left-over", "x");
     p.unpack("example", empty);
     CHECK(!fs::exists(empty / "left-over"));
-    CHECK(fs::exists(empty / "GAME.EXE"));
+    CHECK(fs::exists(empty / "games" / "example" / "game" / "GAME.EXE"));
     fs::remove(state_dir() / "example" / "unpacked-at");
     unsetenv("KRETRO_DWARFS");
   }
@@ -1438,6 +1520,50 @@ static void test_socket_names_are_claimed(const fs::path& tmp) {
   close(b.claim_fd);
 }
 
+// Review I2 of the media-set work: without FUSE a set is unpacked once and
+// every game of it plays from that copy. Unpacking it again - the set was
+// rebuilt since - removes the tree, so it waits for no other game of the set
+// to be playing from it.
+static void test_a_shared_unpack_waits_for_the_set(const fs::path& tmp) {
+  section("session: a set is not unpacked again under another game of it that is playing");
+  fs::path pack = make_set(tmp, "s-00000000000000dd", {"example-game-a", "example-game-b"});
+  fs::path tool = tmp / "fake-dwarfs-set";
+  write_file(tool,
+             "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+             "for g in example-game-a example-game-b; do mkdir -p \"$out/games/$g/game\" && "
+             "echo unpacked > \"$out/games/$g/game/GAME.EXE\"; done\n");
+  fs::permissions(tool, fs::perms::owner_all);
+  session::GameLock playing = session::lock_game("example-game-b");
+  CHECK(!playing.busy());
+  pid_t pid = fork();
+  if (pid == 0) {
+    alarm(60);
+    setenv("KRETRO_DWARFS", tool.c_str(), 1);
+    session::PlayRequest req;
+    req.id = "example-game-a";
+    session::Source src;
+    src.file = pack;
+    src.off = 0;
+    src.len = fs::file_size(pack);
+    src.no_fuse = true;
+    src.may_unpack = true;
+    src.extract_dir = tmp / "shared-unpacked";
+    req.source = src;
+    req.dry_run = true;
+    bool refused = false;
+    try {
+      session::play(rt::Env{}, req);
+    } catch (const std::exception& ex) {
+      refused = contains(ex.what(), "The game example-game-b");
+    }
+    const bool untouched = !fs::exists(tmp / "shared-unpacked" / "games");
+    _exit(refused && untouched ? 0 : 1 + (refused ? 0 : 1) + (untouched ? 0 : 2));
+  }
+  int st = 0;
+  waitpid(pid, &st, 0);
+  CHECK_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+}
+
 static void test_play_stops_when_asked(const fs::path& tmp) {
   section("session: a stop asked before the prefix is touched ends the session there");
   fs::path file = tmp / "classics.run";
@@ -1525,6 +1651,8 @@ int main(int argc, char** argv) {
     test_input_helper_args();
     test_newest_file(tmp);
     test_player_file(tmp);
+    test_player_sets(tmp);
+    test_a_shared_unpack_waits_for_the_set(tmp);
     test_helper_state(tmp);
     test_signal_while_mounting(tmp);
     test_tied_children();

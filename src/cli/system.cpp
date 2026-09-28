@@ -28,6 +28,7 @@ int cmd_info(const rt::Env& e, std::vector<std::string>& /*a*/) {
   }
   std::printf("state         %s\n", state_dir().c_str());
   std::printf("  games       %s\n", games_dir().c_str());
+  std::printf("  packs       %s\n", packs_dir().c_str());
   std::printf("  saves       %s\n", saves_dir().c_str());
   std::printf("  prefixes    %s\n", prefixes_dir().c_str());
   std::printf("discs         %s\n", install::iso_dir().c_str());

@@ -1,9 +1,11 @@
-// A pack's metadata: who the game is, how it was installed, how it runs, the
-// discs it came from and the tree it is. Encoded as CBOR and stored
-// zstd-compressed after the header.
+// A pack's metadata: the media set it is - its discs, each once, and the games
+// installed from them - and for each game who it is, how it was installed, how
+// it runs and the tree it is. Encoded as CBOR and stored zstd-compressed after
+// the header.
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <string_view>
@@ -16,9 +18,9 @@ namespace kg {
 
 // Meta::Body::packing for a body made with `mkdwarfs --categorize -S 22`:
 // what is already compressed stored raw, in 4 MiB blocks, so a random read
-// from a mount decompresses one block's worth. A body without it was packed
-// before, with mkdwarfs's defaults, and reads more slowly; the Bundles page
-// offers to repack it.
+// from a mount decompresses one block's worth. Every body this build packs is
+// packed this way; the string says so in the pack, so a pack that reads slowly
+// can be told apart if the flags ever change again.
 //
 // mkdwarfs_body (dwarfs.h) runs exactly those flags. The two are a pair and
 // change together.
@@ -80,22 +82,6 @@ struct Meta {
     bool pause_on_blur = true;
   } present;
 
-  // Where the game is inside the body.
-  //
-  //   "flat"    the DwarFS image root *is* the game tree. Every pack written
-  //             before container revision 2 is this, and stays this.
-  //   "rooted"  the image root holds game/ , system/ , discs/<n>/ and
-  //             registry.reg.
-  //
-  // `tree` covers game/ in both cases, with paths relative to it, so the Merkle
-  // root keeps the one meaning it has always had: the identity of the installed
-  // game. A pack built with its discs and one built without therefore have the
-  // same root and answer to the same recipe. What is outside game/ is covered
-  // by body.blake3 instead - two hashes, two jobs.
-  std::string layout = "flat";
-
-  bool rooted() const { return layout == "rooted"; }
-
   // Where under C: the installer put the game. It is the one thing the old
   // record/replay block leaves behind that anything still reads: the six
   // others - the family, the answer file's name and its contents, replayable,
@@ -133,6 +119,9 @@ struct Meta {
   // The discs this install used, so a restored capsule can present the same
   // CD-ROM drives to a game that checks for its disc at runtime.
   struct Disc {
+    // Its directory in the body, discs/<key>/: disc_key() of the image, so the
+    // same disc has the same key whichever game brought it into the set.
+    std::string key;
     std::string label;
     uint32_t serial = 0;
     std::string ref;   // "archive#LABEL", to find it again in a collection
@@ -141,23 +130,20 @@ struct Meta {
     // disc the wizard was handed from anywhere else on the disk would resolve
     // to nothing on a rebuild. This is how it is found again.
     std::string source;
-    // True when this disc's tree is inside the body, at discs/<n>/. Every pack
-    // this kretro writes embeds every disc it installed from, so today the
-    // false case means a revision 1 pack, which had a flat body and nowhere to
-    // put them. The field is wider than the writer on purpose: a pack that was
-    // built somewhere else, or by a later kretro that can be told to leave the
-    // gigabytes out, describes itself here and is read correctly. Play
-    // attaches a CD-ROM only for the embedded ones; for the rest the honest
-    // answer is that the game needs the original disc, and `ref` says which.
-    bool embedded = false;
+    // Its tree and CD audio unpacked, for "how much room would unpacking take".
+    uint64_t bytes = 0;
   };
+  // This game's discs in drive order: discs[i] is drive 'd'+i. Filled from the
+  // set's list on decode.
   std::vector<Disc> discs;
 
   // Per-game gamepad bindings, over the default map. A 1997 game with the wrong
   // keys can be fixed without changing the default for every other game.
   std::map<std::string, std::string> input;
 
-  // Describes the body so corruption is detectable without extracting it.
+  // Describes the body so corruption is detectable without extracting it. It
+  // is the set's body, one per pack and shared by every game in it; decode
+  // fills it in each game's view.
   struct Body {
     uint64_t length = 0;
     Hash blake3{};
@@ -169,9 +155,44 @@ struct Meta {
   } body;
 
   Tree tree;
-
-  std::string encode() const;                     // CBOR
-  static Meta decode(std::string_view cbor_data);
 };
+
+// A pack's whole metadata: one media set. A DVD holding three games is one set
+// of three games and one disc, so the disc is stored once however many games
+// came off it.
+struct SetMeta {
+  // Names the pack on the shelf, packs/<set_id>.kgpack: set_id_for() of the
+  // discs it was made from, so it never names a game.
+  std::string set_id;
+  // Each disc once, in the order the set first carried them.
+  std::vector<Meta::Disc> discs;
+  // Sorted by id when encoded. Each one's `discs` and `body` are filled from
+  // the set on decode.
+  std::vector<Meta> games;
+  Meta::Body body;
+
+  const Meta* find(std::string_view id) const;
+  // The header's root: BLAKE3 over the games' Merkle roots in id order. Each
+  // game's own root keeps meaning the installed game and nothing else.
+  Hash root() const;
+
+  std::string encode() const;  // CBOR
+  static SetMeta decode(std::string_view cbor_data);
+};
+
+// A disc's key: the first 16 hex digits of BLAKE3 over its size (8 bytes,
+// little endian) and its 64 MiB prefix hash. Both are read by every path that
+// opens a disc, so a disc gets the same key whichever of them opened it; the
+// fingerprint's hash cannot serve, because the wizard records the prefix's
+// there and install::run the whole image's.
+std::string disc_key(uint64_t size, const Hash& prefix);
+// "s-" and 16 hex digits of BLAKE3 over the sorted keys, one per line, or over
+// "game:<id>" for a game with no disc at all. Titles never reach a set's name.
+std::string set_id_for(std::vector<std::string> disc_keys, std::string_view game_id);
+// Where a game and a disc are inside a set's body.
+std::filesystem::path body_game_dir(std::string_view id);   // games/<id>
+std::filesystem::path body_disc_dir(std::string_view key);  // discs/<key>
+// A set of one game, named after that game's discs.
+SetMeta set_of(Meta m);
 
 }  // namespace kg

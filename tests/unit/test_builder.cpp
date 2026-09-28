@@ -114,8 +114,10 @@ struct PackSpec {
 };
 
 // A capsule as install writes one, except that its body is not a DwarFS image:
-// nothing here mounts it, and only its hash is ever checked.
-static fs::path make_pack(const fs::path& tmp, const fs::path& shelf, const PackSpec& s) {
+// nothing here mounts it, and only its hash is ever checked. `state` is a
+// state directory: the set goes in its packs/ and the game's index in its
+// games/, as an install puts them.
+static fs::path make_pack(const fs::path& tmp, const fs::path& state, const PackSpec& s) {
   fs::path root = tmp / ("tree-" + s.id);
   fs::remove_all(root);
   write_file(root / s.exe, as_string(make_pe({"KERNEL32.dll", "d3d8.dll"})));
@@ -130,10 +132,9 @@ static fs::path make_pack(const fs::path& tmp, const fs::path& shelf, const Pack
   m.runtime.dgvoodoo = s.dgvoodoo;
   m.tree = Tree::from_directory(root);
   if (s.with_disc) {
-    m.layout = "rooted";
     Meta::Disc d;
+    d.key = "1111111111111111";
     d.label = "DISC1";
-    d.embedded = true;
     m.discs.push_back(d);
     DiscFingerprint fp;
     fp.size = 3 * m.tree.total_bytes();  // the disc weighs three times the game
@@ -145,9 +146,12 @@ static fs::path make_pack(const fs::path& tmp, const fs::path& shelf, const Pack
   std::string b;
   for (size_t i = 0; i < s.body; ++i) b.push_back(static_cast<char>('a' + (i * 7 + s.id.size()) % 26));
   write_file(body, b);
-  fs::path out = shelf / (s.id + ".kgpack");
-  fs::create_directories(shelf);
-  write_pack(out, m, WriteOptions{kg::PackKind::Game, body, false});
+  SetMeta set = set_of(m);
+  fs::path out = state / "packs" / (set.set_id + ".kgpack");
+  fs::create_directories(out.parent_path());
+  fs::create_directories(state / "games");
+  write_pack(out, set, WriteOptions{kg::PackKind::Game, body, false});
+  write_file(state / "games" / (s.id + ".set"), set.set_id + "\n");
   return out;
 }
 
@@ -416,77 +420,6 @@ static void test_remember_built(const fs::path& tmp) {
   CHECK(!all.empty() && all[0].title == d.title && all[0].last_built == "/out/classics.run");
 }
 
-// "Repack for faster loading": an older pack's body packed again the way
-// install packs one now, with the Merkle root it had.
-static void test_repack(const fs::path& tmp) {
-  section("an older pack is repacked for faster loading, and is the same game after");
-  const std::string tool = dwarfs_tool();
-  if (tool.empty()) {
-    std::fprintf(stderr, "  skip: no dwarfs tool (build/dwarfs-universal or KRETRO_DWARFS) to repack with\n");
-    return;
-  }
-  fs::path img = tmp / "repack-img";
-  fs::remove_all(img);
-  write_file(img / "game" / "GAME.EXE", "MZ the game");
-  write_file(img / "game" / "data" / "level1.dat", std::string(200000, 'L'));
-  write_file(img / "system" / "windows" / "system32" / "old.dll", "a 1998 DLL");
-  write_file(img / "registry.reg", "REGEDIT4\n");
-  fs::path body = tmp / "repack.dwarfs";
-  CHECK(kg::run({tool, "--tool=mkdwarfs", "-i", img.string(), "-o", body.string(), "--log-level=error", "--force"})
-            .ok());
-  Meta m;
-  m.id = "old";
-  m.name = "An old pack";
-  m.layout = "rooted";
-  m.run.exe = "GAME.EXE";
-  m.tree = Tree::from_directory(img / "game");
-  fs::path pack = tmp / "old.kgpack";
-  write_pack(pack, m, WriteOptions{kg::PackKind::Game, body, false});
-  const Hash old_body = Pack::open(pack).meta().body.blake3;
-  CHECK(packed_before_faster_loading(read_pack_facts(pack)));
-
-  std::vector<std::string> stages;
-  Callbacks cb;
-  cb.progress = [&](const Progress& p) { stages.emplace_back(p.stage); };
-  repack_for_faster_loading(pack, tool, tmp / "repack-scratch", cb);
-  Pack after = Pack::open(pack);
-  CHECK(after.verify().ok);
-  CHECK_EQ(to_hex(after.meta().tree.root()), to_hex(m.tree.root()));
-  CHECK_EQ(to_hex(after.header().blake3_root), to_hex(m.tree.root()));
-  CHECK(after.meta().body.blake3 != old_body);
-  CHECK_EQ(after.meta().body.packing, std::string(kBodyPacking));
-  CHECK(!packed_before_faster_loading(read_pack_facts(pack)));
-  CHECK_EQ(after.meta().name, m.name);
-  CHECK(!fs::exists(tmp / "repack-scratch"));
-  CHECK(!fs::exists(pack.string() + ".repack"));
-  CHECK(!stages.empty() && stages.back() == "done");
-  // What is outside game/ went back in too.
-  fs::path out = tmp / "repack-out";
-  after.extract_body(tmp / "after.dwarfs");
-  fs::create_directories(out);
-  CHECK(kg::run({tool, "--tool=dwarfsextract", "-i", (tmp / "after.dwarfs").string(), "-o", out.string()}).ok());
-  CHECK(fs::exists(out / "system" / "windows" / "system32" / "old.dll"));
-  CHECK(fs::exists(out / "registry.reg"));
-
-  // A pack whose body is not the tree it names is left exactly as it was.
-  Meta wrong = m;
-  wrong.tree = Tree::from_directory(img / "system");
-  fs::path liar = tmp / "liar.kgpack";
-  write_pack(liar, wrong, WriteOptions{kg::PackKind::Game, body, false});
-  const std::string before = [&] {
-    std::ifstream f(liar, std::ios::binary);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-  }();
-  CHECK_THROWS_WITH(repack_for_faster_loading(liar, tool, tmp / "repack-scratch"), "not its own");
-  std::ifstream f(liar, std::ios::binary);
-  std::stringstream ss;
-  ss << f.rdbuf();
-  CHECK(ss.str() == before);
-  CHECK(!fs::exists(tmp / "repack-scratch"));
-}
-
 static void test_fragment() {
   section("a pack's registry fragment read back, and where a key goes");
   // What install writes, read back value for value.
@@ -537,12 +470,12 @@ static void test_fragment() {
 static void test_checks(const fs::path& tmp) {
   section("the check list against fixture packs");
   fs::path shelf = tmp / "shelf";
-  PackFacts keyed = read_pack_facts(make_pack(tmp, shelf, {"keyed", kKeyFragment, {}, false, false, 20000}));
-  PackFacts clean = read_pack_facts(make_pack(tmp, shelf, {"clean", kCleanFragment, {}, false, false, 20000}));
+  PackFacts keyed = read_pack_facts(make_pack(tmp, shelf, {"keyed", kKeyFragment, {}, false, false, 20000}), "keyed");
+  PackFacts clean = read_pack_facts(make_pack(tmp, shelf, {"clean", kCleanFragment, {}, false, false, 20000}), "clean");
   PackFacts protected_ = read_pack_facts(
-      make_pack(tmp, shelf, {"safedisc", kCleanFragment, {"drvmgt.dll", "sub/SECDRV.SYS", "sintf32.dll"}, false, false, 20000}));
-  PackFacts dgv = read_pack_facts(make_pack(tmp, shelf, {"dgv", kCleanFragment, {}, true, false, 20000}));
-  PackFacts glide = read_pack_facts(make_pack(tmp, shelf, {"glide", kCleanFragment, {"glide2x.dll"}, false, false, 20000}));
+      make_pack(tmp, shelf, {"safedisc", kCleanFragment, {"drvmgt.dll", "sub/SECDRV.SYS", "sintf32.dll"}, false, false, 20000}), "safedisc");
+  PackFacts dgv = read_pack_facts(make_pack(tmp, shelf, {"dgv", kCleanFragment, {}, true, false, 20000}), "dgv");
+  PackFacts glide = read_pack_facts(make_pack(tmp, shelf, {"glide", kCleanFragment, {"glide2x.dll"}, false, false, 20000}), "glide");
 
   CHECK_EQ(keyed.meta.id, std::string("keyed"));
   CHECK(keyed.bytes > 20000u);
@@ -648,31 +581,21 @@ static void test_checks(const fs::path& tmp) {
 
 static void test_size(const fs::path& tmp) {
   section("size, per part, and the 2 GiB and 4 GiB warnings");
-  // A pack with its disc: the estimate shares its bytes out by unpacked size,
-  // and the disc weighs three times the game.
-  PackFacts withdisc = read_pack_facts(make_pack(tmp, tmp / "shelf", {"withdisc", "", {}, false, true, 40000}));
-  CHECK_EQ(withdisc.discs_carried, size_t(1));
-  CHECK(withdisc.without_discs < withdisc.bytes);
-  CHECK(withdisc.without_discs > withdisc.bytes / 4 - 16);
-  CHECK(withdisc.without_discs < withdisc.bytes / 4 + 16);
-  PackFacts nodisc = read_pack_facts(make_pack(tmp, tmp / "shelf", {"nodisc", "", {}, false, false, 40000}));
-  CHECK_EQ(nodisc.without_discs, nodisc.bytes);
+  // A pack is counted at its size on the shelf, discs and all.
+  PackFacts withdisc = read_pack_facts(make_pack(tmp, tmp / "shelf", {"withdisc", "", {}, false, true, 40000}), "withdisc");
+  CHECK_EQ(withdisc.bytes, fs::file_size(withdisc.path));
 
   // The arithmetic, exactly as build_bundle lays a file out.
   PackFacts a, b;
   a.meta.id = "a";
   a.meta.name = "A";
   a.bytes = 10000;
-  a.without_discs = 5000;
   b.meta.id = "b";
   b.bytes = 4096;
-  b.without_discs = 4096;
   SizeReport r = size_report(100000, 500, {&a, &b});
   uint64_t tail = kTocHeaderSize + kRecordSize * 6 + kTrailerSize;
   // 100000 -> 102400, + 500 meta, -> 106496 + 10000, -> 118784 + 4096.
   CHECK_EQ(r.total, uint64_t(122880) + tail);
-  // The same with 5000 for the first game: -> 106496 + 5000, -> 114688 + 4096.
-  CHECK_EQ(r.total_without_discs, uint64_t(118784) + tail);
   CHECK_EQ(r.games.size(), size_t(2));
   CHECK_EQ(r.games[0].label, std::string("A"));
   CHECK_EQ(r.games[1].label, std::string("b"));  // no name: the id
@@ -685,7 +608,6 @@ static void test_size(const fs::path& tmp) {
     PackFacts p;
     p.meta.id = "p";
     p.bytes = pack;
-    p.without_discs = pack;
     return size_report(4096, 1, {&p});
   };
   uint64_t fixed = 8192 + kTocHeaderSize + kRecordSize * 5 + kTrailerSize;
@@ -704,14 +626,14 @@ static void test_size(const fs::path& tmp) {
   CHECK(has_text(over4.warnings, "FAT32"));
   CHECK(!has_text(over4.warnings, "over 2 GiB"));
 
-  // Over the limit with its discs and under it without: said, with the way out.
+  // Over the limit is said, and there is no "without their discs" way out to
+  // offer: every pack carries its discs.
   PackFacts big;
   big.meta.id = "big";
   big.bytes = kWarn2G + (100ull << 20);
-  big.without_discs = 1ull << 30;
   SizeReport r2 = size_report(300ull << 20, 4096, {&big});
   CHECK(has_text(r2.warnings, "over 2 GiB"));
-  CHECK(has_text(r2.warnings, "Without their discs"));
+  CHECK(!has_text(r2.warnings, "ithout"));
 }
 
 // ---- auto backend ---------------------------------------------------------------------------
@@ -740,7 +662,7 @@ static void test_auto_backend(const fs::path& tmp) {
   CHECK(glide_only(pe::parse(make_pe({"glide3x.dll", "KERNEL32.dll"}))));
   CHECK(!glide_only(junk));
 
-  // Out of a real pack: GAME.EXE inside a DwarFS body, rooted, named in a
+  // Out of a real pack: GAME.EXE inside a DwarFS body laid out as a set, named in a
   // different case than the tree has it.
   std::string tool;
   if (const char* t = std::getenv("KRETRO_DWARFS"); t && *t) tool = t;
@@ -751,9 +673,9 @@ static void test_auto_backend(const fs::path& tmp) {
   }
   fs::path img = tmp / "img";
   fs::remove_all(img);
-  write_file(img / "game" / "Bin" / "Game.EXE", as_string(make_pe({"KERNEL32.dll", "d3d8.dll"})));
-  write_file(img / "game" / "readme.txt", "hello");
-  write_file(img / "registry.reg", "REGEDIT4\n");
+  write_file(img / "games" / "example" / "game" / "Bin" / "Game.EXE", as_string(make_pe({"KERNEL32.dll", "d3d8.dll"})));
+  write_file(img / "games" / "example" / "game" / "readme.txt", "hello");
+  write_file(img / "games" / "example" / "registry.reg", "REGEDIT4\n");
   fs::path body = tmp / "img.dwarfs";
   ProcResult mk = kg::run({tool, "--tool=mkdwarfs", "-i", img.string(), "-o", body.string(), "--log-level=error",
                            "--force"});
@@ -765,24 +687,23 @@ static void test_auto_backend(const fs::path& tmp) {
   Meta m;
   m.id = "example";
   m.name = "EXAMPLE";
-  m.layout = "rooted";
   m.run.exe = "bin\\game.exe";
-  m.tree = Tree::from_directory(img / "game");
+  m.tree = Tree::from_directory(img / "games" / "example" / "game");
   fs::path pack = tmp / "example.kgpack";
-  write_pack(pack, m, WriteOptions{kg::PackKind::Game, body, false});
-  pe::Imports got = read_exe_imports(read_pack_facts(pack), tool, tmp / "scratch-exe");
+  write_pack(pack, set_of(m), WriteOptions{kg::PackKind::Game, body, false});
+  pe::Imports got = read_exe_imports(read_pack_facts(pack, "example"), tool, tmp / "scratch-exe");
   CHECK(got.ok);
   CHECK(got.imports("d3d8"));
   CHECK_EQ(auto_backend(got).backend, std::string("dxvk"));
   CHECK(!fs::exists(tmp / "scratch-exe"));  // emptied again
 
   // Nothing to read, said rather than thrown.
-  PackFacts none = read_pack_facts(pack);
+  PackFacts none = read_pack_facts(pack, "example");
   none.meta.run.exe = "missing.exe";
   pe::Imports miss = read_exe_imports(none, tool, tmp / "scratch-exe");
   CHECK(!miss.ok);
   CHECK(miss.error.find("not in the pack") != std::string::npos);
-  CHECK(!read_exe_imports(read_pack_facts(pack), "", tmp / "scratch-exe").ok);
+  CHECK(!read_exe_imports(read_pack_facts(pack, "example"), "", tmp / "scratch-exe").ok);
 }
 
 // ---- preview --------------------------------------------------------------------------------
@@ -923,7 +844,7 @@ static void test_build_from_draft(const fs::path& tmp) {
   d.out_dir = out.string();
   d.rights = true;
   for (const char* id : {"classic2", "example"}) {
-    DraftGame g = game_from_pack(read_pack_facts(games / (std::string(id) + ".kgpack")));
+    DraftGame g = game_from_pack(read_pack_facts(find_pack_on_shelf(games, id), id));
     d.games.push_back(g);
   }
   d.games[1].embed_key = true;
@@ -934,7 +855,7 @@ static void test_build_from_draft(const fs::path& tmp) {
   fs::path base = make_base(tmp);
   unsetenv("KRETRO_PLAYER_BASE");
   const std::string tool = dwarfs_tool();
-  BuildInputs in{.self = base, .games_dir = games, .keys_file = keys, .tool = tool, .cache = tmp / "cache"};
+  BuildInputs in{.self = base, .state = games, .keys_file = keys, .tool = tool, .cache = tmp / "cache"};
   CHECK_THROWS_WITH(build_from_draft(d, in), "make player-base");
   in.self.clear();
   CHECK_THROWS_WITH(build_from_draft(d, in), "KRETRO_SELF");
@@ -981,11 +902,13 @@ static void test_build_from_draft(const fs::path& tmp) {
 
   // The size the page promised is the size written.
   std::vector<PackFacts> facts;
-  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(games / (g.id + ".kgpack")));
+  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(find_pack_on_shelf(games, g.id), g.id));
   std::vector<const PackFacts*> ptrs;
   for (const PackFacts& f : facts) ptrs.push_back(&f);
   BaseSource src = find_player_base(kretro);
-  BundleMeta meta = meta_from_draft(d, install::load_keys(keys), v.meta.built_at, v.meta.licenses);
+  std::map<std::string, std::string> sets;
+  for (const PackFacts& f : facts) sets[f.meta.id] = f.set_id;
+  BundleMeta meta = meta_from_draft(d, install::load_keys(keys), v.meta.built_at, v.meta.licenses, sets);
   SizeReport sr = size_report(player_base_bytes(src), meta.encode().size(), ptrs);
   CHECK_EQ(sr.total, b.size);
 
@@ -1023,9 +946,10 @@ static void test_build_from_draft(const fs::path& tmp) {
   d.rights = true;
 
   // A game gone from the shelf.
-  fs::rename(games / "example.kgpack", tmp / "example.away");
+  const fs::path example_pack = find_pack_on_shelf(games, "example");
+  fs::rename(example_pack, tmp / "example.away");
   CHECK_THROWS_WITH(build_from_draft(d, in), "no longer on the shelf");
-  fs::rename(tmp / "example.away", games / "example.kgpack");
+  fs::rename(tmp / "example.away", example_pack);
 
   // KRETRO_PLAYER_BASE: a development tree's own player base, whole.
   setenv("KRETRO_PLAYER_BASE", base.c_str(), 1);
@@ -1059,10 +983,147 @@ static void test_build_from_draft(const fs::path& tmp) {
   in.out = base;
   CHECK_THROWS_WITH(build_from_draft(d, in), "which it is built from");
   CHECK(slurp(base) == base_bytes);
-  in.out = games / "example.kgpack";
+  in.out = example_pack;
   CHECK_THROWS_WITH(build_from_draft(d, in), "which it is built from");
-  CHECK_EQ(read_pack_facts(games / "example.kgpack").meta.id, std::string("example"));
+  CHECK_EQ(read_pack_facts(example_pack, "example").meta.id, std::string("example"));
+  // A game is found through its index, and one without an index is not on
+  // the shelf even when a pack holding it is.
+  CHECK_EQ(find_pack_on_shelf(games, "example"), example_pack);
+  CHECK(find_pack_on_shelf(games, "no-such-game").empty());
   in.out.clear();
+}
+
+// ---- a set trimmed to the games a player carries -----------------------------------
+
+// A body laid out as a set, packed for real: games/<id>/game and discs/<key>.
+static fs::path make_real_set(const fs::path& tmp, const std::string& tool, const std::string& name,
+                              SetMeta& s) {
+  fs::path img = tmp / (name + "-img");
+  fs::remove_all(img);
+  for (Meta& g : s.games) {
+    write_file(img / "games" / g.id / "game" / "GAME.EXE", "MZ " + g.id + std::string(5000, 'g'));
+    g.tree = Tree::from_directory(img / "games" / g.id / "game");
+    g.run.exe = "GAME.EXE";
+    g.name = "The game " + g.id;
+  }
+  // Bytes that do not compress, so a disc left out is a pack visibly smaller.
+  for (const Meta::Disc& d : s.discs) {
+    std::string movie(200000, '\0');
+    uint32_t x = static_cast<uint32_t>(d.key[0]) * 2654435761u;
+    for (char& c : movie) {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      c = static_cast<char>(x & 0xff);
+    }
+    write_file(img / "discs" / d.key / "MOVIE.BIK", movie);
+  }
+  fs::path body = tmp / (name + ".dwarfs");
+  CHECK(kg::run({tool, "--tool=mkdwarfs", "-i", img.string(), "-o", body.string(), "--log-level=error", "--force"})
+            .ok());
+  fs::path pack = tmp / (name + ".kgpack");
+  write_pack(pack, s, WriteOptions{kg::PackKind::Game, body, false});
+  return pack;
+}
+
+static SetMeta two_game_set() {
+  SetMeta s;
+  s.set_id = "s-00000000000000aa";
+  Meta::Disc d1, d2;
+  d1.key = "1111111111111111";
+  d2.key = "2222222222222222";
+  s.discs = {d1, d2};
+  Meta a, b;
+  a.id = "example-game-a";
+  a.discs = {d1};
+  b.id = "example-game-b";
+  b.discs = {d2, d1};
+  s.games = {a, b};
+  return s;
+}
+
+static void test_trim(const fs::path& tmp) {
+  section("a set is trimmed to the games a player carries");
+  SetMeta s = two_game_set();
+  SetMeta t = trim_meta(s, {"example-game-a"});
+  CHECK_EQ(t.set_id, s.set_id);
+  CHECK_EQ(t.games.size(), size_t{1});
+  CHECK_EQ(t.discs.size(), size_t{1});
+  CHECK(!t.discs.empty() && t.discs[0].key == "1111111111111111");
+  CHECK_THROWS_WITH(trim_meta(s, {"example-game-c"}), "example-game-c");
+
+  const std::string tool = dwarfs_tool();
+  if (tool.empty()) {
+    std::fprintf(stderr, "  skip: no dwarfs tool (build/dwarfs-universal or KRETRO_DWARFS) to trim with\n");
+    return;
+  }
+  fs::path pack = make_real_set(tmp, tool, "trim-set", s);
+  // All of it chosen: the pack itself, not a copy.
+  CHECK_EQ(trimmed_set(pack, {"example-game-b", "example-game-a"}, tool, tmp / "trim-cache"), pack);
+  fs::path cut = trimmed_set(pack, {"example-game-a"}, tool, tmp / "trim-cache");
+  CHECK(cut != pack);
+  Pack c = Pack::open(cut);
+  CHECK(c.verify().ok);
+  CHECK_EQ(c.set().set_id, s.set_id);
+  CHECK_EQ(c.games().size(), size_t{1});
+  CHECK_EQ(c.set().discs.size(), size_t{1});
+  CHECK_EQ(c.game("example-game-a").tree.root(), s.games[0].tree.root());
+  CHECK(fs::file_size(cut) < fs::file_size(pack));
+  // Asked again, the trim already made is handed back rather than made again.
+  const auto when = fs::last_write_time(cut);
+  CHECK_EQ(trimmed_set(pack, {"example-game-a"}, tool, tmp / "trim-cache"), cut);
+  CHECK(fs::last_write_time(cut) == when);
+  // Nothing is left behind but the trim itself.
+  size_t left = 0;
+  for (const auto& de : fs::directory_iterator(tmp / "trim-cache" / "trim")) left += de.path() != cut;
+  CHECK_EQ(left, size_t{0});
+}
+
+// A bundle of one game from a set of two carries the set trimmed to that game.
+static void test_build_a_part_of_a_set(const fs::path& tmp) {
+  section("a player of one game from a set of two carries that game and its discs only");
+  const std::string tool = dwarfs_tool();
+  if (tool.empty()) {
+    std::fprintf(stderr, "  skip: no dwarfs tool (build/dwarfs-universal or KRETRO_DWARFS) to trim with\n");
+    return;
+  }
+  fs::path state = tmp / "part-state";
+  fs::remove_all(state);
+  SetMeta s = two_game_set();
+  fs::path made = make_real_set(tmp, tool, "part-set", s);
+  fs::create_directories(state / "packs");
+  fs::rename(made, state / "packs" / (s.set_id + ".kgpack"));
+  for (const Meta& g : s.games) write_file(state / "games" / (g.id + ".set"), s.set_id + "\n");
+
+  fs::path out = tmp / "part-out";
+  fs::remove_all(out);
+  fs::create_directories(out);
+  Draft d;
+  d.title = "Part";
+  d.id = "part";
+  d.version = "1";
+  d.out_dir = out.string();
+  d.rights = true;
+  d.games.push_back(game_from_pack(read_pack_facts(find_pack_on_shelf(state, "example-game-b"), "example-game-b")));
+  const fs::path base = make_base(tmp / "part");
+  BuildInputs in{.self = {},
+                 .state = state,
+                 .keys_file = tmp / "part-keys.txt",
+                 .tool = tool,
+                 .cache = tmp / "part-cache",
+                 .base = base,
+                 .out = {}};
+  Built b = build_from_draft(d, in);
+  Verified v = verify_bundle(b.path);
+  CHECK_EQ(v.meta.games.size(), size_t{1});
+  CHECK_EQ(v.meta.games[0].set, s.set_id);
+  const Entry* e = v.toc.pack(s.set_id);
+  CHECK(e != nullptr);
+  if (!e) return;
+  Pack inside = Pack::open(b.path, v.toc.at(*e), e->len);
+  CHECK_EQ(inside.games().size(), size_t{1});
+  CHECK_EQ(inside.set().discs.size(), size_t{2});  // b uses both discs
+  CHECK(inside.set().find("example-game-a") == nullptr);
 }
 
 // ---- golden bytes -------------------------------------------------------------
@@ -1176,7 +1237,7 @@ static void test_contract(const fs::path& tmp) {
   d.version = "1";
   d.out_dir = out.string();
   d.rights = true;
-  DraftGame g = game_from_pack(read_pack_facts(games / "example.kgpack"));
+  DraftGame g = game_from_pack(read_pack_facts(find_pack_on_shelf(games, "example"), "example"));
   CHECK_EQ(g.gamepad, std::string("a=Return\n"));  // the pack's own, in the one form
   // What a person types into the page's box: spaces, and more than one a line.
   g.gamepad += " start = p ; b=Escape\nnonsense\n";
@@ -1187,14 +1248,14 @@ static void test_contract(const fs::path& tmp) {
   d.games.push_back(g);
 
   fs::path base = make_base(tmp / "contract");
-  BuildInputs in{.games_dir = games, .keys_file = keys, .tool = tool, .cache = tmp / "contract-cache", .base = base};
+  BuildInputs in{.state = games, .keys_file = keys, .tool = tool, .cache = tmp / "contract-cache", .base = base};
   Built b = build_from_draft(d, in);
   player::Bundle pb = player::Bundle::open(b.path);
   const GameMeta* gm = pb.game("example");
   CHECK(gm != nullptr);
   if (!gm) return;
   const Entry* e = pb.pack("example");
-  Meta pm = Pack::open(pb.self, pb.toc.at(*e), e->len).meta();
+  Meta pm = Pack::open(pb.self, pb.toc.at(*e), e->len).game("example");
 
   // The gamepad: the pack's own map, the author's over it.
   player::GameSettings s = player::default_settings(gm->display, gm->fullscreen);
@@ -1216,7 +1277,7 @@ static void test_contract(const fs::path& tmp) {
     CHECK(player::key_registry(*gm->key).find("[HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Example Publisher\\EXAMPLE]\n\"CDKey\"=") !=
           std::string::npos);
   }
-  BundleMeta m64 = meta_from_draft(d, vault, "", {}, {{"example", true}});
+  BundleMeta m64 = meta_from_draft(d, vault, "", {}, {{"example", pb.game("example")->set}}, {{"example", true}});
   CHECK_EQ(m64.games[0].key->view, std::string("64"));
   CHECK(player::key_registry(*m64.games[0].key).find("[HKEY_LOCAL_MACHINE\\Software\\Example Publisher\\EXAMPLE]") !=
         std::string::npos);
@@ -1239,8 +1300,8 @@ static void test_contract(const fs::path& tmp) {
 // each pack off the shelf and its vault key, with games[i].pack pointing into
 // packs - through a move too, which is how the facts leave the function.
 static void test_draft_facts(const fs::path& tmp) {
-  make_pack(tmp, games_dir(), {"facts-one", kCleanFragment, {}, false, false, 20000});
-  make_pack(tmp, games_dir(), {"facts-two", "", {}, false, false, 20000});
+  make_pack(tmp, state_dir(), {"facts-one", kCleanFragment, {}, false, false, 20000});
+  make_pack(tmp, state_dir(), {"facts-two", "", {}, false, false, 20000});
   std::vector<install::StoredKey> keys;
   install::put_key(keys, "facts-two", "ABCD-1234", "");
   install::save_keys(install::keys_file(), keys);
@@ -1284,10 +1345,9 @@ static int real(int argc, char** argv) {
   d.out_dir = argv[3];
   d.rights = true;
   for (int i = 4; i < argc; ++i) {
-    PackFacts f = read_pack_facts(game_pack(std::string(argv[i])));
+    PackFacts f = read_pack_facts(game_pack(std::string(argv[i])), argv[i]);
     d.games.push_back(game_from_pack(f));
-    std::fprintf(stderr, "%s: %llu bytes, %zu disc(s) carried, about %llu without\n", argv[i],
-                 (unsigned long long)f.bytes, f.discs_carried, (unsigned long long)f.without_discs);
+    std::fprintf(stderr, "%s: %llu bytes\n", argv[i], (unsigned long long)f.bytes);
     const char* tool = std::getenv("KRETRO_DWARFS");
     pe::Imports im = read_exe_imports(f, tool ? tool : "build/dwarfs-universal", fs::path(d.out_dir) / ".exe-scratch");
     AutoBackend ab = auto_backend(im);
@@ -1296,7 +1356,7 @@ static int real(int argc, char** argv) {
   }
   const char* dw = std::getenv("KRETRO_DWARFS");
   BuildInputs in{.self = argv[2],
-                 .games_dir = games_dir(),
+                 .state = state_dir(),
                  .keys_file = install::keys_file(),
                  .tool = dw ? dw : "build/dwarfs-universal",
                  .cache = cache_dir()};
@@ -1310,12 +1370,12 @@ static int real(int argc, char** argv) {
               b.path.c_str(), (unsigned long long)b.size, secs(t0, t1), secs(t1, t2), v.meta.games.size(),
               v.toc.entries.size());
   std::vector<PackFacts> facts;
-  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(game_pack(g.id)));
+  for (const DraftGame& g : d.games) facts.push_back(read_pack_facts(game_pack(g.id), g.id));
   std::vector<const PackFacts*> ptrs;
   for (const PackFacts& f : facts) ptrs.push_back(&f);
   SizeReport sr = size_report(player_base_bytes(find_player_base(argv[2])), v.meta.encode().size(), ptrs);
-  std::printf("  the size step said %llu bytes (about %llu without discs)%s\n", (unsigned long long)sr.total,
-              (unsigned long long)sr.total_without_discs, sr.total == b.size ? ", exactly right" : ", WRONG");
+  std::printf("  the size step said %llu bytes%s\n", (unsigned long long)sr.total,
+              sr.total == b.size ? ", exactly right" : ", WRONG");
   for (const std::string& w : sr.warnings) std::printf("  warning: %s\n", w.c_str());
 
   // The preview, as the page runs it. PREVIEW_ARGS is what to pass: the
@@ -1362,13 +1422,14 @@ int main(int argc, char** argv) {
     test_slug();
     test_remember(tmp);
     test_remember_built(tmp);
-    test_repack(tmp);
     test_fragment();
     test_checks(tmp);
     test_size(tmp);
     test_auto_backend(tmp);
     test_preview_env(tmp);
     test_build_from_draft(tmp);
+    test_trim(tmp);
+    test_build_a_part_of_a_set(tmp);
     test_contract(tmp);
     test_golden_draft();
     test_draft_facts(tmp);

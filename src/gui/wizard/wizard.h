@@ -213,6 +213,11 @@ class Wizard {
   // When the keys file is next looked in for a serial for an empty field:
   // when the step comes up and as the id changes, not on every frame.
   Refresh keys_seen_;
+  // Which of the discs a set on the shelf already carries: read when the
+  // build page comes up for this disc set, not on every frame, because it
+  // opens every pack on the shelf.
+  Refresh shelf_seen_;
+  std::vector<bool> on_shelf_;
   char args_buf_[128] = {};
   char subdir_buf_[128] = {};
   char member_buf_[128] = {};

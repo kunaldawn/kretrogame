@@ -33,7 +33,7 @@ as it is. Everything after it is data that the bootstrap and the app find
 through the trailer.
 
 A **player** is the player base (bootstrap, tools, runtime, app) copied up to
-the end of its last payload, followed by `bundle.meta` and one kgpack per game,
+the end of its last payload, followed by `bundle.meta` and one kgpack per set,
 then a new table and trailer. `bundle::build_bundle` writes it. kretro and the
 player base are written by `scripts/kretro-link.py`, and `bundle::link_file`
 writes the same bytes for the tests.
@@ -81,7 +81,7 @@ Record:
 | 8 | 8 | off | where the payload starts, from the start of the file |
 | 16 | 8 | len | the payload's length |
 | 24 | 32 | blake3 | BLAKE3 of the payload's `len` bytes |
-| 56 | 64 | name | UTF-8, NUL-padded: the game id for a pack, empty otherwise |
+| 56 | 64 | name | UTF-8, NUL-padded: the set id for a pack, empty otherwise |
 | 120 | 8 | reserved | written 0, not read |
 
 `toc_len` is always `16 + 128 * count`.
@@ -94,11 +94,11 @@ Record:
 | 2 | runtime | the runtime, a DwarFS image mounted in place | one |
 | 3 | app | the program the runtime's loader runs: kretro, or the player | one |
 | 4 | meta | [`bundle.meta`](#bundlemeta). Its presence makes the file a player. | at most one |
-| 5 | pack | a [kgpack](#kgpack), byte for byte as it was on the author's shelf | any number, each with a distinct name |
+| 5 | pack | a [kgpack](#kgpack): a set, byte for byte as it was on the author's shelf, or trimmed to the games the player carries | any number, each with a distinct name |
 | 6 | player base | a whole player base file, carried inside kretro | at most one |
 
 kretro carries kinds 1, 2, 3 and, when one was linked, 6. A player base
-carries 1, 2 and 3. A player carries 1, 2, 3, 4 and one 5 per game, and never
+carries 1, 2 and 3. A player carries 1, 2, 3, 4 and one 5 per set, and never
 6.
 
 The offsets inside a carried player base (kind 6) are relative to that
@@ -172,12 +172,13 @@ BLAKE3 of the table. Checking happens at different times:
 - **The player** checks the `bundle.meta` entry's hash every time it opens
   its file (`player::Bundle::open`). It checks a pack's hash
   (`player::Player::verify`) the first time a given version of the bundle
-  plays that game, and remembers the result in `<state>/verified`
-  (see [Player state](#player-state)).
+  plays a game from it, and remembers the result in `<state>/verified` for
+  every game of that set (see [Player state](#player-state)).
 - **The builder** re-reads a finished player from disk before renaming it into
   place. `bundle::verify_bundle` checks every entry's BLAKE3, `bundle.meta`,
-  and for each pack its Merkle root, its body hash and that it is the game its
-  entry names.
+  and for each pack its Merkle root, its body hash, that it is the set its
+  entry names, that every game `bundle.meta` lists is in the set it names, and
+  that every game a set carries is listed in that set.
 - **Building from the carried player base** checks the kind 6 entry's BLAKE3
   while copying it.
 - The runtime and app hashes also name cache directories (see
@@ -242,7 +243,8 @@ Decoding rules:
 - A missing optional key takes the default shown below.
 - After decoding, `BundleMeta::validate` runs. It checks that the id is a safe
   directory name, the title is not empty, there is at least one game, each
-  game id is safe, at most 64 bytes and unique, every game has a name, every
+  game id is safe, at most 64 bytes and unique, every game names a set that is
+  a safe name of at most 64 bytes, every game has a name, every
   `backend` and `display` is a known value, every extra file name is safe, an
   embedded key is not empty, and a key's `view` is empty, `"32"` or `"64"`.
 
@@ -266,9 +268,10 @@ Keys of each game map:
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `id` | text | yes | | game id; also the name of its kind 5 entry |
+| `id` | text | yes | | game id |
 | `name` | text | yes | | |
 | `year` | uint | no | 0 | must fit in 32 bits |
+| `set` | text | yes | | the set the game plays from: the name of the kind 5 entry whose pack holds it. Games of one disc name one entry. |
 | `cover` | bytes | no | none | PNG. Written only when not empty. |
 | `backend` | text | no | `auto` | `auto`, `dxvk`, `wined3d-vk`, `wined3d-gl` or `cnc-ddraw` |
 | `needs_gpu` | bool | no | false | |
@@ -287,9 +290,15 @@ optional key and with none.
 
 ## kgpack
 
-One installed game, a recipe for rebuilding one, or a save export. The same
-envelope is used in `<state>/games/<id>.kgpack`, `<id>.recipe.kgpack`, save
-exports, and byte for byte as a kind 5 payload inside a player.
+One media set - every disc once, and every game installed from those discs -
+a recipe for rebuilding one game, or a save export. The same envelope is used
+in `<state>/packs/<set_id>.kgpack`, `<id>.recipe.kgpack`, save exports, and
+byte for byte as a kind 5 payload inside a player.
+
+A DVD or zip holding three games is one pack of three games and the disc
+once; one game on three discs is one pack of one game and three discs. Every
+game in a pack plays from the one DwarFS image, so mkdwarfs stores the files
+a game copied off its disc once, against the disc.
 
 ```
 [96-byte header][zstd-compressed metadata][zero padding][body]
@@ -306,7 +315,7 @@ pack's range inside a larger file).
 | Offset | Size | Field | Value |
 |---:|---:|---|---|
 | 0 | 7 | magic | `KGPACK\0` |
-| 7 | 1 | revision | container revision: written as 2, read if 1 or 2 |
+| 7 | 1 | revision | container revision: 3 |
 | 8 | 2 | format_version | written 1 (`kPackFormatVersion`), not checked |
 | 10 | 2 | flags | bit 0 has body, bit 1 signed, bit 2 body is squashfs (clear: DwarFS) |
 | 12 | 2 | kind | `PackKind`: 1 game, 2 runtime, 3 save export |
@@ -317,43 +326,48 @@ pack's range inside a larger file).
 | 40 | 8 | body_len | 0 without a body |
 | 48 | 8 | sig_off | written 0 |
 | 56 | 8 | sig_len | written 0 |
-| 64 | 32 | blake3_root | the Merkle root of the game tree (see [Merkle root](#merkle-root)) |
+| 64 | 32 | blake3_root | the set's root (see [Merkle root](#merkle-root)) |
 
 Revisions:
 
-- **1, flat:** the DwarFS body's root is the game tree.
-- **2, rooted:** the body's root holds `game/`, `system/`, `discs/<n>/` and
-  `registry.reg` (see [Body](#body)).
+- **3, a set:** the body's root holds `discs/<key>/` and `games/<id>/` (see
+  [Body](#body)).
+- **1 and 2** were one game each, with its own copy of its discs. They are no
+  longer read: `Header::parse` refuses them with "made by an older kretro;
+  install the game again".
 
-This build writes revision 2 for every pack. The metadata's `layout` key, not
-the revision, says which layout a body has. A missing `layout` means `flat`,
-which is true of every revision 1 pack.
-
-`Header::parse` refuses a header that is shorter than 96 bytes, has the wrong
-magic, a revision outside 1 to 2, a kind outside 1 to 3, a `meta_len` over
+`Header::parse` also refuses a header that is shorter than 96 bytes, has the
+wrong magic, a revision above 3, a kind outside 1 to 3, a `meta_len` over
 64 MiB, a `body_len` over 1 TiB, or a has-body flag that disagrees with
 `body_len` being non-zero. `Pack::open` then requires the metadata and the body
 to lie inside the pack's own length, checked by subtraction.
 
 Nothing in this build writes a signature. No pack has the signed flag, and
-`sig_off` and `sig_len` are zero. The repacker refuses a signed pack, and also
-a squashfs body.
+`sig_off` and `sig_len` are zero.
 
 ### Metadata
 
-`kg::Meta::encode` produces a CBOR map, and `write_pack` compresses it with
+`kg::SetMeta::encode` produces a CBOR map, and `write_pack` compresses it with
 zstd at level 19 into a single frame that records its content size. The
 reader refuses a frame without a content size, or one that declares more than
 64 MiB decompressed.
 
-The map has 16 keys, written in this order:
+The set map has 4 keys, written in this order:
+
+| Key | Type | Contents |
+|---|---|---|
+| `set_id` | text | the set's name (see [Set ids](#set-ids)) |
+| `discs2` | array of maps | each disc of the set once: `key` text (its directory, `discs/<key>/`), `label` text, `serial` uint, `ref` text (`archive#LABEL`), `source` text (absolute path it was opened from), `bytes` uint (its tree and CD audio, unpacked) |
+| `games` | array of maps | one per game, sorted by `id` |
+| `body` | map | `length` uint, `blake3` bytes(32), and `packing` text only when not empty |
+
+Each game map has 14 keys, written in this order:
 
 | Key | Type | Contents |
 |---|---|---|
 | `id` | text | game id |
 | `name` | text | |
 | `year` | uint | |
-| `layout` | text | `flat` or `rooted` |
 | `who` | map | `developer` text, `publisher` text |
 | `recipe` | map | `method` text (`unzip`, `copy`, `wine_setup` or `installer_exe`), `member` text, `subdir` text, `setup` text, `setup_ref` text, `discs` array of text, `verify` array of text, `fingerprints` array of fingerprint maps |
 | `run` | map | `exe` text, `args` text, `windows_version` text, `width` uint, `height` uint |
@@ -361,35 +375,35 @@ The map has 16 keys, written in this order:
 | `present` | map | `dar` text (default `4:3`), `pause_on_blur` bool (default true) |
 | `install` | map | `install_dir` text: where under `C:` the installer put the game |
 | `registry` | map | `fragment` text: the REGEDIT4 text the installer created |
-| `system` | map | `files` uint, `bytes` uint: what is under `system/` in the body |
+| `system` | map | `files` uint, `bytes` uint: what is under the game's `system/` in the body |
 | `input` | map | text to text: gamepad bindings over the default map |
-| `discs2` | array of maps | `label` text, `serial` uint, `ref` text (`archive#LABEL`), `source` text (absolute path it was opened from), `embedded` bool (its tree is in the body at `discs/<n>/`) |
-| `body` | map | `length` uint, `blake3` bytes(32), and `packing` text only when not empty |
-| `tree` | text | the tree's canonical text (see [Merkle root](#merkle-root)) |
+| `discs` | array of text | the game's discs as keys into `discs2`, in drive order: entry i is drive `D:` + i |
+| `tree` | text | the game tree's canonical text (see [Merkle root](#merkle-root)) |
 
 A fingerprint map has `filename` text, `size` uint, `blake3` bytes(32),
 `volume_id` text, `created` text and `anchors`, an array of
 `{path: text, size: uint, blake3: bytes(32)}`. The fingerprint's `blake3` is
 of the whole image, or of its first `iso::kPrefixBytes` when only that was
-read.
+read. The recipe's `discs` are references to find the discs again, and its
+`fingerprints` go with them, one for one; the game's own `discs` are keys.
 
-The disc list is called `discs2` because the recipe map already has a
-`discs` key.
+In C++ a game is a `kg::Meta` and the set a `kg::SetMeta`. On decode each
+game's `Meta::discs` is filled from `discs2` in the game's drive order, and its
+`Meta::body` is the set's body, so code that holds one game reads its discs
+and body as its own.
 
 `body.packing` is `kBodyPacking`, `categorize,S22`, for a body made the way
-install packs one now, which is `kg::mkdwarfs_body`:
+every pack is packed now, which is `kg::mkdwarfs_body`:
 
 ```
 <tool> --tool=mkdwarfs -i <in> -o <out> --categorize -S 22 --log-level=error --no-progress -f
 ```
 
-The string and the flags are a pair and change together. An empty `packing`
-means the body was packed earlier with mkdwarfs's defaults. The Bundles page
-offers to repack such a body. The packing never affects the Merkle root.
+The string and the flags are a pair and change together. The packing never
+affects the Merkle root.
 
-**Lenient decoding.** `Meta::decode` is deliberately forgiving, because a
-pack written by a newer kretro must open in an older one, and packs written
-before a key existed must still open:
+**Lenient decoding.** `SetMeta::decode` is forgiving about what a newer
+kretro may add:
 
 - An absent key leaves the default.
 - A key of the wrong type takes the accessor's fallback (`text_or`,
@@ -398,17 +412,38 @@ before a key existed must still open:
 - Non-text items in a string array are skipped.
 - An `input` key that is not text decodes as `""`. A golden test in
   `test_pack` pins this.
-- Unknown keys are ignored. Older packs may carry a `filter` key under
-  `present` and more fields under `install`, which are ignored.
+- Unknown keys are ignored.
 
-Only three things are refused:
+What is refused:
 
 - metadata that is not a map;
-- an `id` that is not a safe id (`kg::id_is_safe`);
+- a `set_id`, a game `id` or a disc `key` that is not a safe name
+  (`kg::id_is_safe`);
+- a disc `key` listed twice in `discs2`;
+- a game that names a disc key `discs2` does not list;
+- two games with one id;
+- a set with no games;
 - an `install_dir` that is not a relative path under `C:`
   (`kg::install_dir_is_safe`).
 
 A `tree` text that does not parse throws from `Tree::from_canonical`.
+
+### Disc keys
+
+A disc's key is the first 16 hex digits of the BLAKE3 of its image's size, as
+8 bytes little-endian, followed by its 64 MiB prefix hash (`iso::Info::prefix`):
+`kg::disc_key`. Every path that opens a disc reads both, the wizard,
+`install::run` and `disc::open_directory` alike, so one disc has one key
+however it was installed. The fingerprint's hash cannot serve: the wizard
+records the prefix's there and `install::run` the whole image's.
+
+### Set ids
+
+`s-` followed by the first 16 hex digits of the BLAKE3 of the set's disc keys,
+sorted, one per line (`kg::set_id_for`). A game with no disc at all hashes
+`game:<id>` instead. The id is fixed when the set is first written and never
+changes as games and discs are added. When one install joins several sets,
+the smallest of their ids is kept. An id never contains a title.
 
 ### Body
 
@@ -416,18 +451,19 @@ A DwarFS image (or squashfs with flag bit 2), starting at
 `align_up(96 + meta_len, 4096)` so that it can be mounted in place. It stays
 aligned inside a player because the pack itself starts on a page there.
 
-A rooted body holds:
-
 | Path | Contents |
 |---|---|
-| `game/` | the game directory; the Merkle root covers exactly this |
-| `system/` | files the installer wrote outside the game directory, relative to `drive_c`; present only when there were any |
-| `discs/<n>/` | disc *n*, numbered from 1, with `.windows-label` and `.windows-serial`, and its CD audio under `audio/` |
-| `registry.reg` | the same text as `registry.fragment`; present only when not empty |
+| `discs/<key>/` | each disc of the set once, with `.windows-label` and `.windows-serial`, and its CD audio under `audio/` |
+| `games/<id>/game/` | the game directory; the game's Merkle root covers exactly this |
+| `games/<id>/system/` | files the installer wrote outside the game directory, relative to `drive_c`; present only when there were any |
+| `games/<id>/registry.reg` | the same text as the game's `registry.fragment`; present only when not empty |
+
+Disc directories are named by key, never numbered, so adding a game to a set
+or trimming it for a player never renames one.
 
 `body.blake3` is the BLAKE3 of the whole body, and `body.length` its size.
-`Pack::verify` checks the root against the tree and the body against these
-two.
+`Pack::verify` checks the root against the games' trees and the body against
+these two.
 
 ### Merkle root
 
@@ -440,20 +476,23 @@ two.
 `mode` is the `st_mode`. For a regular file `size` is its length and `hash`
 the BLAKE3 of its contents. For a symlink they are the length and BLAKE3 of
 its target string. For a directory they are 0 and the BLAKE3 of the empty
-string. Paths are relative, `/`-separated, and have no leading `./`. The root
-(`Tree::root`, and the header's `blake3_root`) is the BLAKE3 of that text.
+string. Paths are relative, `/`-separated, and have no leading `./`. A game's
+root (`Tree::root`) is the BLAKE3 of that text, and covers `games/<id>/game/`
+only.
 
-The root covers the game tree only: all of a flat body, `game/` of a rooted
-one. So a capsule and a recipe of the same install, or a pack with its discs
-and one without them, have the same root.
+The header's `blake3_root` is the set's root (`SetMeta::root`): the BLAKE3 of
+the games' roots, 32 bytes each, in game id order. So a game has the same root
+in every set it is packed into, in a recipe, and in a trimmed set inside a
+player, and a rebuilt install is checked against the game's root, not the
+set's.
 
 ### Kinds of pack
 
 | Use | PackKind | Body |
 |---|---|---|
-| installed game (capsule) | 1 game | yes |
-| recipe | 1 game | no: identity, fingerprints and root only |
-| save export | 3 save export | the saves |
+| a media set on the shelf, or in a player | 1 game | yes |
+| recipe | 1 game | no: a set of one game, with its identity, fingerprints and root; its `discs2` names the discs and nothing carries them |
+| save export | 3 save export | the saves; a set of one entry and no discs |
 | pinned runtime capsule | 2 runtime | yes |
 
 ## Remembered bundles
@@ -521,14 +560,15 @@ kretro keeps its state by kind of thing. A player keeps it by game, once
 | Path | Contents |
 |---|---|
 | `<state>/config.toml` | settings |
-| `<state>/games/<id>.kgpack` | installed games |
+| `<state>/packs/<set_id>.kgpack` | installed sets: every disc once, and the games installed from them |
+| `<state>/games/<id>.set` | one line per installed game: the set id it is in |
 | `<state>/runtimes/` | pinned runtime capsules |
 | `<state>/saves/<id>/` | the game's saves (see [Saves](#saves)), and its mount points `image/` and `merged/` |
 | `<state>/prefixes/<id>/` | Wine prefixes; disposable |
 | `<state>/home/<id>/` | the game's own `HOME` |
-| `<state>/extracted/<id>/` | the game unpacked, where FUSE is unavailable |
+| `<state>/extracted/<set_id>/` | the set unpacked, where FUSE is unavailable; every game of it plays from there |
 | `<state>/gl/` | links to host driver libraries |
-| `<state>/cache/` | scratch: `repack/`, `bundle-exe/`, `stage-probe/`, the GStreamer registry |
+| `<state>/cache/` | scratch: `trim/` (sets cut down to a player's games, kept for the next build), `bundle-exe/`, `stage-probe/`, the GStreamer registry |
 | `<state>/bundles/<id>.cbor` | [remembered bundles](#remembered-bundles) |
 | `<state>/keys.txt` | serials stored with `kretro key` |
 | `<state>/manifests/` | local manifests |
@@ -555,7 +595,7 @@ private directory that must belong to the user (`player::choose_state`).
 | `<state>/<id>/saves/` | see [Saves](#saves) |
 | `<state>/<id>/prefix/` | the game's Wine prefix |
 | `<state>/<id>/home/` | the game's `HOME` |
-| `<state>/<id>/unpacked-at` | where `--extract-to` put the game, one line |
+| `<state>/<id>/unpacked-at` | where `--extract-to` put the game's set, one line; written for every game of the set |
 
 The mount points and the unpacked copy stay out of the state, because the
 state may be on a USB stick:
@@ -563,7 +603,7 @@ state may be on a USB stick:
 | Path | Contents |
 |---|---|
 | `$XDG_RUNTIME_DIR/kretro/<bundle>-<key>/<id>/{image,merged}` | mount points |
-| `$XDG_CACHE_HOME/kretro/<bundle>-<key>/<id>/` | the unpacked game, with `<dir>.stamp` beside it |
+| `$XDG_CACHE_HOME/kretro/<bundle>-<key>/<set_id>/` | the unpacked set, with `<dir>.stamp` beside it |
 
 `<key>` is `kg::state_key(<state>)`: the first 8 hex digits of the FNV-1a hash
 of the normalised state path.
@@ -624,7 +664,7 @@ tests:
   `tests/fixtures/boot/mkv3.py` is the v3 linker as it shipped, and proves
   that v3 and v2 binaries still run.
 - The golden tests pin the encoders' exact bytes: `test_pack` ("golden: the
-  pack header", "golden: pack metadata, with and without body.packing",
+  pack header", "golden: set metadata, with and without body.packing",
   "golden: an input key that is not text decodes as \"\""), `test_bundle`
   ("golden: bundle.meta, with every optional part and with none", "golden:
   the table of contents and the trailer") and `test_builder` ("golden: a

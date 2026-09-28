@@ -51,18 +51,15 @@ constexpr Command kCommands[] = {
      "  kretro contents <archive[#LABEL]>   what is on a disc\n"},
     {"stage-probe", Needs::Env, kAny, cmd_stage_probe, ""},
     {"install", Needs::GpuEnv, kAny, cmd_install,
-     "  kretro install <id> [--headless] [--force] [--keep-tree] [--no-discs]\n"
+     "  kretro install <id> [--headless] [--force] [--keep-tree]\n"
      "                               open the wizard on a game we have a manifest for;\n"
      "                               --headless installs a copy or unzip game with no\n"
      "                               display, for scripts. An installer you have to click\n"
-     "                               through has no headless form and refuses.\n"
-     "                               --no-discs leaves the discs out of the pack.\n"},
+     "                               through has no headless form and refuses.\n"},
     {"list", Needs::Env, kAny, cmd_list,
      "  kretro list                  your collection\n"},
     {"verify", Needs::Env, kOne, cmd_verify,
      "  kretro verify <id>           check a pack's tree root and its body\n"},
-    {"uninstall", Needs::Env, kOne, cmd_uninstall,
-     "  kretro uninstall <id>\n"},
     {"play", Needs::GpuEnv, kAny, cmd_play,
      "  kretro play <id> [--fullscreen] [--integer|--fit|--native] [--scale N] [--dry-run]\n"
      "                    [--note \"...\"]\n"},

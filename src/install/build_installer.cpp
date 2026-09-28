@@ -87,7 +87,7 @@ void Build::mount_discs() {
     disc_trees_[i] = tree;
     say_(std::string("  ") + static_cast<char>(std::toupper(letter)) + ": " + discs_[i].label);
 
-    Meta::Disc d = disc_entry(discs_[i], disc_ref_for(discs_[i]), /*embedded=*/true);
+    Meta::Disc d = disc_entry(discs_[i], disc_ref_for(discs_[i]));
     {
       std::lock_guard<std::mutex> lk(mounts_mu_);
       drives_.push_back(d);

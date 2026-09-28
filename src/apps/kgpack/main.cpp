@@ -3,6 +3,7 @@
 // The tool the rest of kretro's pack handling is built on: install writes
 // packs with it, the session model verifies them with it, and the tier 1
 // tests drive it.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -89,9 +90,21 @@ int cmd_create(const std::vector<std::string>& a) {
   opt.kind = kind;
 
   fs::path body_tmp;
+  fs::path stage;
   if (want_body) {
     body_tmp = fs::path(out).string() + ".body.tmp";
-    std::string cmd = "mkdwarfs -i " + from.string() + " -o " + body_tmp.string() +
+    // A game's body is a set's: the tree goes in at games/<id>/game, linked
+    // rather than copied, so the pack is laid out the way install lays one out.
+    fs::path in = from;
+    if (kind == PackKind::Game) {
+      stage = fs::path(out).string() + ".stage";
+      fs::remove_all(stage);
+      fs::create_directories(stage / body_game_dir(m.id));
+      fs::copy(from, stage / body_game_dir(m.id) / "game",
+               fs::copy_options::recursive | fs::copy_options::create_hard_links);
+      in = stage;
+    }
+    std::string cmd = "mkdwarfs -i " + in.string() + " -o " + body_tmp.string() +
                       " --log-level=error --no-progress -f";
     std::fprintf(stderr, "  packing with mkdwarfs...\n");
     int rc = std::system(cmd.c_str());
@@ -102,8 +115,9 @@ int cmd_create(const std::vector<std::string>& a) {
     opt.body = body_tmp;
   }
 
-  write_pack(out, m, opt);
+  write_pack(out, set_of(m), opt);
   if (!body_tmp.empty()) fs::remove(body_tmp);
+  if (!stage.empty()) fs::remove_all(stage);
 
   Pack p = Pack::open(out);
   std::fprintf(stderr, "  wrote %s (%s), root %s\n", out.c_str(),
@@ -111,36 +125,13 @@ int cmd_create(const std::vector<std::string>& a) {
   return 0;
 }
 
-int cmd_info(const fs::path& p) {
-  Pack pk = Pack::open(p);
-  const Header& h = pk.header();
-  const Meta& m = pk.meta();
-  std::printf("file          %s (%s)\n", p.c_str(), fmt::bytes_iec(fs::file_size(p)).c_str());
-  std::printf("kind          %s\n", pack_kind_name(h.kind));
-  std::printf("format        v%u, container rev %u\n", h.format_version, h.revision);
+// One game of the set: who it is, how it was made, and the drives it gets.
+void print_game(const Meta& m, bool carried) {
   std::printf("id            %s\n", m.id.c_str());
   std::printf("name          %s%s", m.name.c_str(), m.year ? "" : "\n");
   if (m.year) std::printf(" (%u)\n", m.year);
   std::printf("tree          %zu entries, %s\n", m.tree.size(), fmt::bytes_iec(m.tree.total_bytes()).c_str());
-  std::printf("merkle root   %s\n", to_hex(h.blake3_root).c_str());
-  if (h.has_body()) {
-    std::printf("body          %s %s at +%llu\n", h.body_is_squashfs() ? "squashfs" : "dwarfs",
-                fmt::bytes_iec(h.body_len).c_str(), static_cast<unsigned long long>(h.body_off));
-    double ratio = m.tree.total_bytes() ? 100.0 * static_cast<double>(h.body_len) /
-                                              static_cast<double>(m.tree.total_bytes())
-                                        : 0.0;
-    std::printf("              %.1f%% of the tree's %s\n", ratio, fmt::bytes_iec(m.tree.total_bytes()).c_str());
-  } else {
-    std::printf("body          none - this is a recipe pack\n");
-  }
-  // What the body is shaped like, and what the recipe says was done to make
-  // it. Checking a pack by hand meant decoding the CBOR to find out whether
-  // the layout was rooted, whether the discs came along and whether the
-  // fingerprints were ever written - all of it already in the metadata this
-  // command reads, and none of it printed.
-  std::printf("layout        %s\n",
-              m.rooted() ? "rooted - game/ , system/ , discs/<n>/ , registry.reg"
-                         : "flat - the image is the game tree");
+  std::printf("game root     %s\n", to_hex(m.tree.root()).c_str());
   if (!m.recipe.method.empty()) {
     std::string r = m.recipe.method;
     if (!m.recipe.member.empty()) r += "  " + m.recipe.member;
@@ -153,19 +144,19 @@ int cmd_info(const fs::path& p) {
     for (size_t i = 0; i < m.recipe.verify.size(); ++i) v += (i ? ", " : "") + m.recipe.verify[i];
     std::printf("verify        %s\n", v.c_str());
   }
-  // The discs and their fingerprints are one list each, indexed together:
-  // disc i is fingerprint i, and install::lay_out_body (install/body.h) puts
-  // it at discs/<i+1>/. A recipe pack carries the fingerprints and no discs, so
-  // print whichever is longer and say which half is missing.
-  size_t discs = m.discs.size() > m.recipe.fingerprints.size() ? m.discs.size()
-                                                               : m.recipe.fingerprints.size();
+  // The game's discs in drive order, D: first, and the fingerprints its
+  // recipe recorded for them: disc i is fingerprint i. A recipe pack carries
+  // no discs' trees, so print whichever list is longer and say which half is
+  // missing.
+  size_t discs = std::max(m.discs.size(), m.recipe.fingerprints.size());
   for (size_t i = 0; i < discs; ++i) {
     char head[32];
     std::snprintf(head, sizeof(head), "disc %zu", i + 1);
     if (i < m.discs.size()) {
       const Meta::Disc& d = m.discs[i];
-      std::printf("%-13s %s  serial %08x  %s\n", head, d.label.c_str(), d.serial,
-                  d.embedded ? "carried at discs/" : "not carried - needs the original");
+      const std::string where = carried ? "carried at discs/" + d.key + "/" : "named, not carried";
+      std::printf("%-13s %s  serial %08x  %c:  %s\n", head, d.label.c_str(), d.serial, static_cast<char>('D' + i),
+                  where.c_str());
     } else {
       std::printf("%-13s named by the recipe, not carried\n", head);
     }
@@ -181,6 +172,40 @@ int cmd_info(const fs::path& p) {
   }
   if (!m.run.exe.empty()) std::printf("run           %s\n", m.run.exe.c_str());
   if (!m.runtime.id.empty()) std::printf("runtime pin   %s\n", m.runtime.id.c_str());
+}
+
+int cmd_info(const fs::path& p) {
+  Pack pk = Pack::open(p);
+  const Header& h = pk.header();
+  const SetMeta& set = pk.set();
+  std::printf("file          %s (%s)\n", p.c_str(), fmt::bytes_iec(fs::file_size(p)).c_str());
+  std::printf("kind          %s\n", pack_kind_name(h.kind));
+  std::printf("format        v%u, container rev %u\n", h.format_version, h.revision);
+  std::printf("set           %s\n", set.set_id.c_str());
+  // What the body is shaped like, and what each game's recipe says was done
+  // to make it: checking a pack by hand should not mean decoding its CBOR.
+  std::printf("layout        %s\n", "a set - games/<id>/ , discs/<key>/");
+  std::printf("merkle root   %s\n", to_hex(h.blake3_root).c_str());
+  uint64_t trees = 0;
+  for (const Meta& g : set.games) trees += g.tree.total_bytes();
+  if (h.has_body()) {
+    std::printf("body          %s %s at +%llu\n", h.body_is_squashfs() ? "squashfs" : "dwarfs",
+                fmt::bytes_iec(h.body_len).c_str(), static_cast<unsigned long long>(h.body_off));
+    double ratio = trees ? 100.0 * static_cast<double>(h.body_len) / static_cast<double>(trees) : 0.0;
+    std::printf("              %.1f%% of the games' trees, %s\n", ratio, fmt::bytes_iec(trees).c_str());
+  } else {
+    std::printf("body          none - this is a recipe pack\n");
+  }
+  // The set's discs, each once, whichever of its games use them.
+  for (const Meta::Disc& d : set.discs) {
+    std::printf("set disc      %s  %s  serial %08x  %s\n", d.key.c_str(), d.label.c_str(), d.serial,
+                fmt::bytes_iec(d.bytes).c_str());
+  }
+  std::printf("games         %zu\n", set.games.size());
+  for (const Meta& g : set.games) {
+    std::printf("\n");
+    print_game(g, h.has_body());
+  }
   return 0;
 }
 
@@ -192,9 +217,15 @@ int cmd_verify(const fs::path& p) {
 }
 
 int cmd_tree(const fs::path& p) {
+  // One game's tree as it is; each game's under a line naming it, for a set
+  // of several.
   Pack pk = Pack::open(p);
-  std::string c = pk.meta().tree.canonical();
-  std::fwrite(c.data(), 1, c.size(), stdout);
+  for (const Meta& g : pk.games()) {
+    if (pk.games().size() > 1) std::printf("# %s
+", g.id.c_str());
+    std::string c = g.tree.canonical();
+    std::fwrite(c.data(), 1, c.size(), stdout);
+  }
   return 0;
 }
 

@@ -1,53 +1,41 @@
 #include "pack_facts.h"
 
 #include <exception>
+#include <fstream>
 
 #include "../../install/keys.h"
 #include "../../util/env.h"
 #include "../../util/file_io.h"
 #include "../../util/paths.h"
+#include "../../util/safe_names.h"
 #include "../gamepad.h"
 #include "exe_probe.h"
 
 namespace kg::bundle {
 namespace fs = std::filesystem;
 
-fs::path find_pack_on_shelf(const fs::path& games_dir, const std::string& id) {
+fs::path find_pack_on_shelf(const fs::path& state, const std::string& id) {
+  // The same rule as game_set(), for a state that need not be this process's.
+  std::ifstream f(state / "games" / (id + ".set"));
+  std::string set;
+  std::getline(f, set);
+  if (!id_is_safe(set)) return {};
   std::error_code ec;
-  fs::path direct = games_dir / (id + ".kgpack");
-  if (fs::exists(direct, ec)) return direct;
-  for (const fs::directory_entry& de : fs::directory_iterator(games_dir, ec)) {
-    if (de.path().extension() != ".kgpack") continue;
-    try {
-      if (Pack::open(de.path()).meta().id == id) return de.path();
-    } catch (const std::exception&) {
-    }
-  }
-  return {};
+  fs::path p = state / "packs" / (set + ".kgpack");
+  return fs::exists(p, ec) ? p : fs::path();
 }
 
 // ---- packs ------------------------------------------------------------------------
 
-PackFacts read_pack_facts(const fs::path& pack) {
+PackFacts read_pack_facts(const fs::path& pack, const std::string& id) {
   Pack p = Pack::open(pack);
   PackFacts f;
   f.path = pack;
-  f.meta = p.meta();
+  f.meta = p.game(id);
+  f.set_id = p.set().set_id;
+  f.set_games = p.games().size();
   std::error_code ec;
   f.bytes = fs::file_size(pack, ec);
-  for (const Meta::Disc& d : f.meta.discs) (d.embedded ? f.discs_carried : f.discs_named)++;
-  f.without_discs = f.bytes;
-  if (f.discs_carried > 0) {
-    // What the discs weigh unpacked is what their images weighed; the game's
-    // share is its own tree and what its installer wrote to C:.
-    uint64_t disc_bytes = 0;
-    for (const DiscFingerprint& fp : f.meta.recipe.fingerprints) disc_bytes += fp.size;
-    uint64_t game_bytes = f.meta.tree.total_bytes() + f.meta.system.bytes;
-    if (disc_bytes > 0 && game_bytes + disc_bytes > 0) {
-      long double share = static_cast<long double>(game_bytes) / static_cast<long double>(game_bytes + disc_bytes);
-      f.without_discs = static_cast<uint64_t>(static_cast<long double>(f.bytes) * share);
-    }
-  }
   return f;
 }
 
@@ -76,9 +64,9 @@ DraftFacts gather_draft_facts(const Draft& d, bool read_imports) {
   for (size_t i = 0; i < d.games.size(); ++i) {
     std::error_code ec;
     fs::path pk = game_pack(d.games[i].id);
-    if (!fs::exists(pk, ec)) continue;
+    if (pk.empty() || !fs::exists(pk, ec)) continue;
     try {
-      f.packs[i] = read_pack_facts(pk);
+      f.packs[i] = read_pack_facts(pk, d.games[i].id);
     } catch (const std::exception&) {
       continue;
     }

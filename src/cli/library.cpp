@@ -1,4 +1,4 @@
-// kretro list, verify, uninstall, display and show: the games on the shelf.
+// kretro list, verify, display and show: the games on the shelf.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +12,7 @@
 #include "../gui/shelf/shelf.h"
 #include "../gui/screen.h"
 #include "handlers.h"
+#include "../install/share.h"
 #include "../pack/kgpack.h"
 #include "../rt/env.h"
 #include "../util/env.h"
@@ -27,26 +28,23 @@ int cmd_list(const rt::Env& /*e*/, std::vector<std::string>& /*a*/) {
   ensure_state_dirs();
   std::error_code ec;
   int n = 0;
-  std::vector<fs::path> packs;
-  for (const fs::directory_entry& de : fs::directory_iterator(games_dir(), ec)) {
-    if (de.path().extension() == ".kgpack") packs.push_back(de.path());
-  }
-  std::sort(packs.begin(), packs.end());
-  if (packs.empty()) {
+  const std::vector<install::InstalledGame> games = install::installed_games();
+  if (games.empty()) {
     std::printf("No games yet.\n\n  kretro games            what you can install\n"
                 "  kretro install <id>     install one\n");
     return 0;
   }
-  std::printf("%-18s %-32s %-6s %-10s %s\n", "ID", "NAME", "YEAR", "SIZE", "ROOT");
-  for (const fs::path& p : packs) {
+  // SIZE is the set's: games from one disc share one pack.
+  std::printf("%-18s %-32s %-6s %-20s %s\n", "ID", "NAME", "YEAR", "SET", "SIZE");
+  for (const install::InstalledGame& g : games) {
     try {
-      Pack pk = Pack::open(p);
-      std::printf("%-18s %-32s %-6u %-10s %s\n", pk.meta().id.c_str(), pk.meta().name.c_str(),
-                  pk.meta().year, fmt::bytes_iec(fs::file_size(p, ec)).c_str(),
-                  to_hex(pk.header().blake3_root).substr(0, 12).c_str());
+      Pack pk = Pack::open(g.pack);
+      const Meta& m = pk.game(g.id);
+      std::printf("%-18s %-32s %-6u %-20s %s\n", m.id.c_str(), m.name.c_str(), m.year,
+                  pk.set().set_id.c_str(), fmt::bytes_iec(fs::file_size(g.pack, ec)).c_str());
       ++n;
     } catch (const std::exception& ex) {
-      std::printf("%-18s %s\n", p.filename().c_str(), ex.what());
+      std::printf("%-18s %s\n", g.id.c_str(), ex.what());
     }
   }
   return n ? 0 : 1;
@@ -56,35 +54,20 @@ int cmd_verify(const rt::Env& /*e*/, std::vector<std::string>& a) {
   const std::string& id = a[0];
   fs::path p = game_pack(id);
   std::error_code ec;
-  if (!fs::exists(p, ec)) {
+  if (p.empty() || !fs::exists(p, ec)) {
     std::fprintf(stderr, "kretro: %s is not installed\n", id.c_str());
     return 1;
   }
   Pack pk = Pack::open(p);
+  const Meta& m = pk.game(id);
+  // The whole set is checked: its body is one image, whichever game asked.
   Pack::Verification v = pk.verify();
+  std::printf("%-14s %s\n", "set", pk.set().set_id.c_str());
   std::printf("%-14s %s\n", "tree root", v.root_matches ? "ok" : "MISMATCH");
   std::printf("%-14s %s\n", "body", v.body_matches ? "ok" : "CORRUPT");
-  std::printf("%-14s %zu files, %s\n", "contents", pk.meta().tree.size(),
-              fmt::bytes_iec(pk.meta().tree.total_bytes()).c_str());
+  std::printf("%-14s %zu files, %s\n", "contents", m.tree.size(), fmt::bytes_iec(m.tree.total_bytes()).c_str());
   if (!v.ok) std::fprintf(stderr, "\n%s\n", v.detail.c_str());
   return v.ok ? 0 : 1;
-}
-
-int cmd_uninstall(const rt::Env& /*e*/, std::vector<std::string>& a) {
-  const std::string& id = a[0];
-  fs::path p = game_pack(id);
-  std::error_code ec;
-  if (!fs::exists(p, ec)) {
-    std::fprintf(stderr, "kretro: %s is not installed\n", id.c_str());
-    return 1;
-  }
-  // The game is one file, so this really is all of it. Saves are deliberately
-  // somewhere else and are left alone.
-  fs::remove(p, ec);
-  std::printf("removed %s\n", p.c_str());
-  fs::path saves = saves_dir() / id;
-  if (fs::exists(saves, ec)) std::printf("saves kept at %s\n", saves.c_str());
-  return 0;
 }
 
 int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
@@ -93,11 +76,11 @@ int cmd_display(const rt::Env& /*e*/, std::vector<std::string>& a) {
   const uint32_t pw = ps.w, ph = ps.h;
   fs::path pack = game_pack(id);
   std::error_code ec;
-  if (!fs::exists(pack, ec)) {
+  if (pack.empty() || !fs::exists(pack, ec)) {
     std::fprintf(stderr, "kretro: %s is not installed\n", id.c_str());
     return 1;
   }
-  Meta m = Pack::open(pack).meta();
+  Meta m = Pack::open(pack).game(id);
   config::Config cfg = config::load(config::config_file());
   config::Display d = config::for_game(cfg, id);
   config::Geometry g =

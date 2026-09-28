@@ -32,7 +32,6 @@ int cmd_swap(const rt::Env& e, std::vector<std::string>& a);
 // library.cpp
 int cmd_list(const rt::Env& e, std::vector<std::string>& a);
 int cmd_verify(const rt::Env& e, std::vector<std::string>& a);
-int cmd_uninstall(const rt::Env& e, std::vector<std::string>& a);
 int cmd_display(const rt::Env& e, std::vector<std::string>& a);
 int cmd_panel(const rt::Env& e, std::vector<std::string>& a);
 int cmd_show(const rt::Env& e, std::vector<std::string>& a);

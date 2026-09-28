@@ -23,16 +23,19 @@ std::string output_name(const Draft& d);
 
 // bundle.meta, from the draft and the vault. `keys` is the vault's contents;
 // a game's key is read from it only when the author asked for it embedded.
-// `exe64` says, per game id, whether its executable is 64-bit, which decides
-// the registry view an embedded key is written for; a game not in it is taken
-// as 32-bit, which every game of this era is.
+// `sets` says, per game id, which set the game plays from; a game not in it
+// names none, which is enough to measure a bundle.meta and not enough to build
+// one. `exe64` says, per game id, whether its executable is 64-bit, which
+// decides the registry view an embedded key is written for; a game not in it is
+// taken as 32-bit, which every game of this era is.
 BundleMeta meta_from_draft(const Draft& d, const std::vector<install::StoredKey>& keys,
                            const std::string& built_at, const std::vector<std::string>& licenses,
+                           const std::map<std::string, std::string>& sets = {},
                            const std::map<std::string, bool>& exe64 = {});
 
 struct BuildInputs {
   std::filesystem::path self;        // kretro's own file
-  std::filesystem::path games_dir;   // the shelf
+  std::filesystem::path state;       // the state directory whose shelf the games are on
   std::filesystem::path keys_file;   // the vault
   // dwarfs-universal: reads the base's licence list and a keyed game's
   // executable. May be empty; the licence list is then empty and a key is
@@ -54,8 +57,9 @@ struct BuildInputs {
 // Either variable, when unset, is an empty path.
 BuildInputs shelf_build_inputs(const std::filesystem::path& base = {});
 
-// Everything the page's Build button does: the base out of kretro, the packs
-// off the shelf in draft order, bundle.meta, build_bundle into
+// Everything the page's Build button does: the base out of kretro, the sets
+// off the shelf in draft order - each once, and cut down to the games chosen
+// when not all of its games are - bundle.meta, build_bundle into
 // <out_dir>/<id>-<version>.run.partial, verified and renamed. Throws as
 // build_bundle does, and leaves no .partial behind.
 Built build_from_draft(const Draft& d, const BuildInputs& in, const Callbacks& cb = {});

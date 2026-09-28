@@ -55,7 +55,7 @@ int input_helper(const Bundle& b, const std::vector<std::string>& args) {
     std::map<std::string, std::string> own;
     try {
       const bundle::Entry* e = b.pack(game);
-      own = Pack::open(b.self, b.toc.at(*e), e->len).meta().input;
+      own = Pack::open(b.self, b.toc.at(*e), e->len).game(game).input;
     } catch (const std::exception&) {
     }
     player::GameSettings s = player::load_game_settings(state_dir() / game / "settings.toml",

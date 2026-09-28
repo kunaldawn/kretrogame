@@ -43,11 +43,12 @@ std::vector<disc::Disc> resolve_discs(const rt::Env& e, const std::vector<std::s
 // The reference form the resolvers understand: "archive#LABEL".
 std::string disc_ref_for(const disc::Disc& d);
 
-// The Meta::Disc a pack records for one opened disc: its label and serial, the
-// reference it is found again by, the absolute path it was opened from, and
-// whether its tree travels in the body. `ref` is the caller's, because a
-// rebuild keeps the reference its recipe used rather than coining a new one.
-Meta::Disc disc_entry(const disc::Disc& d, std::string ref, bool embedded);
+// The Meta::Disc a pack records for one opened disc: its key (disc_key of the
+// image), its label and serial, the reference it is found again by and the
+// absolute path it was opened from. Every disc a pack names travels in its
+// body. `ref` is the caller's, because a rebuild keeps the reference its recipe
+// used rather than coining a new one.
+Meta::Disc disc_entry(const disc::Disc& d, std::string ref);
 
 // Where the disc a recipe names is on this machine: the collection file its
 // reference names, and failing that the one whose fingerprint matches entry

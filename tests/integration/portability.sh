@@ -159,14 +159,19 @@ else
   PACKER="${KGPACK_BIN:-build/kgpack}"
   DW="${KRETRO_DWARFS:-build/dwarfs-universal}"
   [ -x "$PACKER" ] && [ -x "$DW" ] || { echo "no $PACKER or $DW to make a player with - run: make, or set KRETRO_PLAYER" >&2; exit 2; }
-  mkdir -p "$WORK/bin" "$WORK/tiny" "$WORK/shelf/games"
+  mkdir -p "$WORK/bin" "$WORK/tiny" "$WORK/shelf/games" "$WORK/shelf/packs"
   ln -s "$(realpath "$DW")" "$WORK/bin/mkdwarfs"
   printf 'MZ not really a program\n' >"$WORK/tiny/TINY.EXE"
   printf 'the whole of the data\n' >"$WORK/tiny/data.txt"
   printf 'read me\n' >"$WORK/tiny/readme.txt"
-  PATH="$WORK/bin:$PATH" "$PACKER" create --from "$WORK/tiny" --out "$WORK/shelf/games/tiny.kgpack" --id tiny \
+  PATH="$WORK/bin:$PATH" "$PACKER" create --from "$WORK/tiny" --out "$WORK/tiny.kgpack" --id tiny \
     --name "Tiny" --year 1999 --exe TINY.EXE --dwarfs >"$WORK/pack.log" 2>&1 ||
     { cat "$WORK/pack.log" >&2; echo "could not pack the tiny game" >&2; exit 2; }
+  # On the shelf as an install puts a game there: the set under packs/, and
+  # the game's index naming it.
+  SET="$("$PACKER" info "$WORK/tiny.kgpack" | sed -n 's/^set  *//p')"
+  mv "$WORK/tiny.kgpack" "$WORK/shelf/packs/$SET.kgpack"
+  printf '%s\n' "$SET" >"$WORK/shelf/games/tiny.set"
   PLAYER="$WORK/tiny.run"
   env HOME="$WORK/author" XDG_RUNTIME_DIR="$WORK/run" XDG_CACHE_HOME="$WORK/author/cache" KRETRO_STATE="$WORK/shelf" \
     "$BIN" bundle build -o "$PLAYER" --id portability --title "Portability" --rights tiny >"$WORK/build.log" 2>&1 ||

@@ -42,20 +42,26 @@ refactor keeps them exactly the same.
 
 | Suite | Checks |
 |---|---:|
-| `test_pack` | 209 |
+| `test_pack` | 247 |
 | `test_disc` | 117 |
-| `test_install` | 253 |
-| `test_config` | 107 |
-| `test_wizard` | 372 |
+| `test_install` | 354 |
+| `test_config` | 150 |
+| `test_wizard` | 370 |
 | `test_stage` | 71 |
-| `test_bundle` | 312 |
-| `test_policy` | 390 |
-| `test_player` | 308 |
-| `test_builder` | 298 |
-| `test_bundles_page` | 37 frames |
+| `test_bundle` | 322 |
+| `test_policy` | 408 |
+| `test_player` | 390 |
+| `test_builder` | 302 |
+| `test_bundles_page` | 52 frames |
 | `test_boot.sh` | 79 |
 
 Update this table in the same change as anything that adds checks.
+
+A few checks need the real DwarFS tool, `build/dwarfs-universal` (which `make`
+builds) or `KRETRO_DWARFS`: `test_install`'s "a second game from the same disc
+joins its set", and `test_builder`'s trimming, player-of-part-of-a-set, pack
+read and licence checks. Without it they print a `skip:` line and the counts
+are lower; the table is the count with the tool.
 
 ## Writing unit tests
 
@@ -220,7 +226,6 @@ $EDITOR tests/local.env
 | `KRETRO_MANIFESTS` | install, bundle | where the manifests are (default `games/`) |
 | `KRETRO_TEST_GAMES` | install, bundle | ids of games that install unattended (`copy` or `unzip`, disc named by `iso`) |
 | `KRETRO_TEST_INSTALL_GAME` | install | install.sh's game, if not the first of `KRETRO_TEST_GAMES` |
-| `KRETRO_TEST_NO_DISCS` | bundle | ids packed without their disc |
 | `KRETRO_TEST_COLLECTION` | scan | the listing scan.sh checks against (default `tests/local/expected-collection.txt`) |
 | `KRETRO_PLAYER`, `KRETRO_PLAYER_GAME` | portability | a player to run instead of building a tiny one, and its game |
 

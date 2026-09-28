@@ -115,7 +115,7 @@ void take_lock(const PlayState& st, GameLock& lock) {
 // A player's table names each pack by the game it is; a pack that says it
 // is another game would have its saves and prefix filed under the wrong one.
 void check_pack(PlayState& st, const Pack& pack) {
-  st.m = &pack.meta();
+  st.m = &pack.game(st.id);
   const Meta& m = *st.m;
   if (m.id != st.id) throw std::runtime_error("the pack for " + st.id + " says it is " + m.id);
   st.plan("game", m.name.empty() ? st.id : m.name);
@@ -124,7 +124,7 @@ void check_pack(PlayState& st, const Pack& pack) {
 }
 
 void mount(PlayState& st, Layers& layers, const Pack& pack) {
-  open_layers(layers, st.e, pack, st.req.source ? &*st.req.source : nullptr);
+  open_layers(layers, st.e, pack, st.id, st.req.source ? &*st.req.source : nullptr);
 
   st.say(std::string("game directory: ") +
       (layers.writes_isolated() ? "overlay (writes captured live)" : "extracted (writes found at exit)"));
@@ -195,16 +195,15 @@ void build_wine_env_and_prefix(PlayState& st, const Layers& layers) {
   st.we = rt::wine_env(st.e, st.prefix, st.home);
   if (!m.runtime.dlloverrides.empty()) st.we.set("WINEDLLOVERRIDES", m.runtime.dlloverrides);
 
-  // image/system for a rooted pack, and nothing at all for a flat one: revision
-  // 1 had nowhere to put these files, so there is nothing to look for.
+  // The game's own system/ in the set's image, beside its game/.
   session::prepare_prefix(st.e, st.prefix, st.home, m, /*apply_registry=*/true, st.sayer(),
-                          m.rooted() ? layers.image / "system" : fs::path{});
+                          layers.image / body_game_dir(m.id) / "system");
 }
 
 // Meta.discs is filled at install time, and this is what it is for: a game that checks for its disc at runtime - and the whole of this
 // era does - gets the same drives back that it was installed with.
 //
-// The trees come out of the pack, at image/discs/<n>, each already carrying
+// The trees come out of the pack, at image/discs/<key>, each already carrying
 // the .windows-label and .windows-serial written when the pack was built.
 // Nothing is written into the saves layer, so nothing new enters a snapshot
 // or a save export.
@@ -218,13 +217,11 @@ void attach_discs(PlayState& st, const Layers& layers) {
     // game that recorded D: at install time would look at the wrong drive.
     for (size_t i = 0; i < m.discs.size() && 'd' + i <= 'z'; ++i) {
       const char letter = static_cast<char>('d' + i);
-      fs::path tree = layers.image / "discs" / std::to_string(i + 1);
-      if (!m.discs[i].embedded || !fs::exists(tree, ec)) {
-        // Honest, and the same state the library already shows for a disc it
-        // cannot find: the pack was built without this one, or predates packs
-        // carrying their discs at all.
-        st.say("disc " + std::to_string(i + 1) + " (" + m.discs[i].label +
-            ") is not in this pack; rebuild it to include the discs");
+      fs::path tree = layers.image / body_disc_dir(m.discs[i].key);
+      if (!fs::exists(tree, ec)) {
+        // The pack's metadata lists the disc and its body does not have it:
+        // said, and the rest of the discs are still attached.
+        st.say("disc " + std::to_string(i + 1) + " (" + m.discs[i].label + ") is missing from this pack");
         continue;
       }
       disc::attach_cdrom(st.e, st.prefix, letter, tree);

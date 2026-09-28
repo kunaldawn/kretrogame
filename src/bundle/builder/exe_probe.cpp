@@ -62,7 +62,7 @@ pe::Imports read_exe_imports(const PackFacts& f, const fs::path& tool, const fs:
     if (e.is_regular() && to_lower(e.path) == to_lower(want)) { inside = e.path; break; }
   }
   if (inside.empty()) return fail(f.meta.run.exe + " is not in the pack's tree");
-  if (f.meta.rooted()) inside = "game/" + inside;
+  inside = (body_game_dir(f.meta.id) / "game" / inside).generic_string();
 
   std::optional<Pack> p;
   try {

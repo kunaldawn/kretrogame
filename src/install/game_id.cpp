@@ -37,7 +37,9 @@ IdClash id_clash(const rt::Env& e, const std::string& id) {
   IdClash c;
   std::error_code ec;
   if (id.empty()) return c;
-  c.pack = fs::exists(game_pack(id), ec);
+  // Taken by an index, whether or not the set it names is still there: the
+  // index is what a second install under the id would overwrite.
+  c.pack = fs::exists(game_index(id), ec);
   c.saves = fs::exists(saves_dir() / id, ec);
   c.prefix = fs::exists(prefixes_dir() / id, ec);
   for (const fs::path& d : manifest_dirs(e)) {

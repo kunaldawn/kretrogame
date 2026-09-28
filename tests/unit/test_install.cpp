@@ -13,6 +13,8 @@
 
 #include "disc/drive.h"
 #include "install/body.h"
+#include "install/build.h"
+#include "install/staging.h"
 #include "install/collection.h"
 #include "install/install.h"
 #include "disc/members.h"
@@ -20,6 +22,8 @@
 #include "rt/env.h"
 #include "install/discs.h"
 #include "install/keys.h"
+#include "install/set_merge.h"
+#include "install/share.h"
 #include "session/compositor.h"
 #include "session/journal.h"
 #include "session/layers.h"
@@ -266,18 +270,24 @@ static void test_cdrom_split() {
   CHECK(true);
 }
 
-// The rooted layout, and the one property everything else rests on: putting the
-// discs in the body does not move the game. Meta.tree covers game/ only, so the
-// Merkle root of a pack built with its discs is the root of the same pack built
-// without them, and either answers to the same recipe.
+// The set layout, and the one property everything else rests on: putting the
+// discs and the other games in the body does not move the game. Meta.tree
+// covers games/<id>/game only, so the game's Merkle root is the same in every
+// set it is packed into, and answers to the same recipe.
 static void test_body_layout(const fs::path& tmp) {
+  kgtest::section("a set body: two games, two discs, each once");
   fs::path src = tmp / "layout";
   fs::remove_all(src);
-  fs::path game = src / "tree";
-  fs::create_directories(game / "DATA");
-  std::ofstream(game / "Adventure II.exe") << "MZ the game";
-  std::ofstream(game / "DATA" / "data.pak") << "an archive";
-
+  fs::path a = src / "tree-a";
+  fs::create_directories(a / "DATA");
+  std::ofstream(a / "game.exe") << "MZ game a";
+  std::ofstream(a / "DATA" / "data.pak") << "an archive";
+  fs::path b = src / "tree-b";
+  fs::create_directories(b);
+  std::ofstream(b / "game.exe") << "MZ game b";
+  fs::path sys_b = src / "system-b";
+  fs::create_directories(sys_b / "windows" / "system32");
+  std::ofstream(sys_b / "windows" / "system32" / "old.dll") << "a DLL";
   fs::path d1 = src / "drive-d";
   fs::create_directories(d1 / "install");
   std::ofstream(d1 / "install" / "data1.cab") << "a cabinet";
@@ -286,39 +296,424 @@ static void test_body_layout(const fs::path& tmp) {
   std::ofstream(d2 / "cinematics.bik") << "a movie";
   fs::path flac = src / "track02.flac";
   std::ofstream(flac) << "fLaC";
+  Tree before_a = Tree::from_directory(a);
 
-  Tree before = Tree::from_directory(game);
-
-  std::vector<install::BodyDisc> discs = {
-      install::BodyDisc{d1, "INSTALL", 0x1a2b3c4du, {}},
-      install::BodyDisc{d2, "CINEMATICS", 0x5u, {flac}},
-  };
   fs::path root = src / "body";
-  install::lay_out_body(root, game, discs,
-                        "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\X]\n\"A\"=\"1\"\n");
+  std::vector<uint64_t> sizes = install::lay_out_set_body(
+      root,
+      {install::BodyGame{"example-game-a", a, {}, "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\X]\n\"A\"=\"1\"\n"},
+       install::BodyGame{"example-game-b", b, sys_b, ""}},
+      {install::BodyDisc{"aaaaaaaaaaaaaaaa", d1, "DEMO_DISC_1", 0x1a2b3c4du, {}},
+       install::BodyDisc{"bbbbbbbbbbbbbbbb", d2, "DEMO_DISC_2", 0x5u, {flac}}});
 
-  CHECK(fs::exists(root / "game" / "Adventure II.exe"));
-  CHECK(fs::exists(root / "game" / "DATA" / "data.pak"));
-  CHECK(fs::exists(root / "discs" / "1" / "install" / "data1.cab"));
-  CHECK(fs::exists(root / "discs" / "2" / "cinematics.bik"));
-  CHECK(fs::exists(root / "discs" / "2" / "audio" / "track02.flac"));
-  CHECK(fs::exists(root / "registry.reg"));
+  CHECK(fs::exists(root / "games" / "example-game-a" / "game" / "game.exe"));
+  CHECK(fs::exists(root / "games" / "example-game-a" / "game" / "DATA" / "data.pak"));
+  CHECK(fs::exists(root / "games" / "example-game-a" / "registry.reg"));
+  CHECK(!fs::exists(root / "games" / "example-game-a" / "system"));
+  CHECK(fs::exists(root / "games" / "example-game-b" / "system" / "windows" / "system32" / "old.dll"));
+  CHECK(!fs::exists(root / "games" / "example-game-b" / "registry.reg"));
+  CHECK(fs::exists(root / "discs" / "aaaaaaaaaaaaaaaa" / "install" / "data1.cab"));
+  CHECK(fs::exists(root / "discs" / "bbbbbbbbbbbbbbbb" / "cinematics.bik"));
+  CHECK(fs::exists(root / "discs" / "bbbbbbbbbbbbbbbb" / "audio" / "track02.flac"));
+  CHECK(!fs::exists(root / "game"));
+  CHECK(!fs::exists(root / "registry.reg"));
 
   // The two files a play-time mount can never write, written here, once, while
   // the tree is still ours.
-  std::ifstream lf(root / "discs" / "1" / ".windows-label");
+  std::ifstream lf(root / "discs" / "aaaaaaaaaaaaaaaa" / ".windows-label");
   std::string label;
   std::getline(lf, label);
-  CHECK_EQ(label, std::string("INSTALL"));
-  std::ifstream sf(root / "discs" / "1" / ".windows-serial");
+  CHECK_EQ(label, std::string("DEMO_DISC_1"));
+  std::ifstream sf(root / "discs" / "aaaaaaaaaaaaaaaa" / ".windows-serial");
   std::string serial;
   std::getline(sf, serial);
   CHECK_EQ(serial, std::string("1a2b3c4d"));
 
-  // The claim the whole design rests on.
-  CHECK_EQ(to_hex(Tree::from_directory(root / "game").root()), to_hex(before.root()));
-  // And the discs are genuinely outside it: game/ never grew a discs entry.
-  CHECK_EQ(Tree::from_directory(root / "game").size(), before.size());
+  // Each disc's size, for "how much room would unpacking take".
+  CHECK_EQ(sizes.size(), size_t{2});
+  CHECK(sizes[1] >= 7 + 4);  // the movie and the track, at least
+
+  // The claim the whole design rests on: the root still means the installed
+  // game and nothing else.
+  CHECK_EQ(to_hex(Tree::from_directory(root / "games" / "example-game-a" / "game").root()),
+           to_hex(before_a.root()));
+  CHECK_EQ(Tree::from_directory(root / "games" / "example-game-a" / "game").size(), before_a.size());
+}
+
+// The shelf keeps a set per pack, and each game finds its set through a
+// one-line index beside the other things kept per game.
+static void test_shelf_index(const fs::path&) {
+  kgtest::section("the shelf: a game is found through its index");
+  ensure_state_dirs();
+  CHECK(fs::is_directory(packs_dir()));
+  CHECK(game_pack("example-game").empty());
+  write_game_index("example-game", "s-0123456789abcdef");
+  CHECK_EQ(game_set("example-game"), std::string("s-0123456789abcdef"));
+  CHECK_EQ(game_pack("example-game"), set_pack("s-0123456789abcdef"));
+  CHECK_EQ(set_pack("s-0123456789abcdef"), packs_dir() / "s-0123456789abcdef.kgpack");
+  CHECK_EQ(game_index("example-game").filename().string(), std::string("example-game.set"));
+  write_game_index("example-game-b", "s-0123456789abcdef");
+  std::vector<std::string> ids = indexed_games();
+  CHECK_EQ(ids.size(), size_t{2});
+  CHECK_EQ(ids[0], std::string("example-game"));
+  // A hand-edited index cannot point outside packs/.
+  kgtest::write_file(game_index("example-game-c"), "../../etc\n");
+  CHECK(game_pack("example-game-c").empty());
+  fs::remove(game_index("example-game"));
+  fs::remove(game_index("example-game-b"));
+  fs::remove(game_index("example-game-c"));
+}
+
+// Review Focus 2 of the media-set work: the index names a set that does not
+// hold the game - a crash between the set and its index, or a set deleted by
+// hand. The game reads as not installed, and the shelf lists it once or not
+// at all.
+static void test_index_points_nowhere(const fs::path& tmp) {
+  kgtest::section("an index that names the wrong set reads as not installed");
+  Meta other;
+  other.id = "example-game-b";
+  other.tree = Tree::from_canonical("");
+  SetMeta s = set_of(other);
+  fs::path body = tmp / "nowhere.body";
+  kgtest::write_file(body, std::string(5000, 'n'));
+  write_pack(set_pack(s.set_id), s, WriteOptions{PackKind::Game, body, false});
+  write_game_index("example-game", s.set_id);
+  write_game_index("example-game-b", s.set_id);
+  write_game_index("example-game-c", "s-00000000000000ff");  // no such pack
+  std::vector<install::InstalledGame> got = install::installed_games();
+  CHECK_EQ(got.size(), size_t{1});
+  CHECK(!got.empty() && got[0].id == "example-game-b");
+  CHECK(!got.empty() && got[0].pack == set_pack(s.set_id));
+  fs::remove(game_index("example-game"));
+  fs::remove(game_index("example-game-b"));
+  fs::remove(game_index("example-game-c"));
+  fs::remove(set_pack(s.set_id));
+}
+
+// Review Focus 3: a set whose game is already on the shelf in another set is
+// refused, naming the set it is in; the shelf is left as it was.
+static void test_import_refuses_a_game_in_another_set(const fs::path& tmp) {
+  kgtest::section("importing a set whose game is already in another one is refused");
+  Meta a;
+  a.id = "example-game";
+  a.tree = Tree::from_canonical("");
+  SetMeta mine = set_of(a);
+  fs::path body = tmp / "mine.body";
+  kgtest::write_file(body, std::string(5000, 'm'));
+  write_pack(set_pack(mine.set_id), mine, WriteOptions{PackKind::Game, body, false});
+  write_game_index("example-game", mine.set_id);
+
+  SetMeta theirs = mine;
+  theirs.set_id = "s-fedcba9876543210";
+  fs::path in = tmp / "theirs.kgpack";
+  write_pack(in, theirs, WriteOptions{PackKind::Game, body, false});
+  CHECK_THROWS_WITH(install::import_pack(rt::Env{}, in, /*replace=*/true, [](const std::string&) {}),
+                    mine.set_id);
+  CHECK_EQ(game_set("example-game"), mine.set_id);
+  CHECK(!fs::exists(set_pack(theirs.set_id)));
+
+  // The same set again is an import of what is already there: refused unless
+  // asked to replace it, and then it is the set that is replaced.
+  fs::path again = tmp / "again.kgpack";
+  write_pack(again, mine, WriteOptions{PackKind::Game, body, false});
+  CHECK_THROWS_WITH(install::import_pack(rt::Env{}, again, /*replace=*/false, [](const std::string&) {}),
+                    "already installed");
+  install::ImportResult r = install::import_pack(rt::Env{}, again, /*replace=*/true, [](const std::string&) {});
+  CHECK(r.had_body);
+  CHECK_EQ(r.pack, set_pack(mine.set_id));
+  CHECK_EQ(r.ids, std::vector<std::string>{"example-game"});
+
+  // Review I1: two people install different games off one disc, so their sets
+  // have one id. A capsule of the other's set would replace this one and take
+  // example-game with it: refused, replace or not, naming what would be lost.
+  Meta b;
+  b.id = "example-game-b";
+  b.tree = Tree::from_canonical("");
+  SetMeta friends = mine;
+  friends.games = {b};
+  fs::path theirs_too = tmp / "friends.kgpack";
+  write_pack(theirs_too, friends, WriteOptions{PackKind::Game, body, false});
+  CHECK_THROWS_WITH(install::import_pack(rt::Env{}, theirs_too, /*replace=*/true, [](const std::string&) {}),
+                    "example-game would");
+  CHECK_THROWS_WITH(install::import_pack(rt::Env{}, theirs_too, /*replace=*/false, [](const std::string&) {}),
+                    mine.set_id);
+  CHECK(Pack::open(set_pack(mine.set_id)).set().find("example-game") != nullptr);
+  CHECK(game_set("example-game-b").empty());
+
+  // Review I3: the shelf is written by one install or import at a time.
+  {
+    session::GameLock held = session::lock_path(packs_dir() / ".lock");
+    CHECK(!held.busy());
+    CHECK_THROWS_WITH(install::import_pack(rt::Env{}, again, /*replace=*/true, [](const std::string&) {}),
+                      "another install");
+  }
+  CHECK(install::import_pack(rt::Env{}, again, /*replace=*/true, [](const std::string&) {}).had_body);
+  fs::remove(game_index("example-game"));
+  fs::remove(set_pack(mine.set_id));
+}
+
+static Meta merge_game(const std::string& id, std::vector<std::string> keys) {
+  Meta m;
+  m.id = id;
+  m.tree = Tree::from_canonical("");
+  for (const std::string& k : keys) {
+    Meta::Disc d;
+    d.key = k;
+    d.label = "DEMO_" + k.substr(0, 4);
+    m.discs.push_back(d);
+  }
+  return m;
+}
+
+static install::ShelfSet shelf_set(const std::string& id, std::vector<Meta> games) {
+  install::ShelfSet s;
+  s.path = "/nowhere/" + id + ".kgpack";
+  s.meta.set_id = id;
+  for (const Meta& g : games) {
+    for (const Meta::Disc& d : g.discs) {
+      bool have = false;
+      for (const Meta::Disc& x : s.meta.discs) have = have || x.key == d.key;
+      if (!have) s.meta.discs.push_back(d);
+    }
+    s.meta.games.push_back(g);
+  }
+  return s;
+}
+
+// Where a new game goes: a set of its own, or the set its discs are already
+// in, with any it bridges folded into one.
+static void test_plan_merge() {
+  kgtest::section("planning where a new game goes");
+  const std::string k1 = "1111111111111111", k2 = "2222222222222222", k3 = "3333333333333333";
+
+  // Nothing on the shelf: a set of its own.
+  install::MergePlan p = install::plan_merge({}, merge_game("example-game-a", {k1}));
+  CHECK(p.fold.empty());
+  CHECK_EQ(p.set_id, set_id_for({k1}, "example-game-a"));
+  CHECK_EQ(p.meta.set_id, p.set_id);
+  CHECK_EQ(p.new_disc_keys, std::vector<std::string>{k1});
+
+  // A second game from the same disc joins that set, and the disc is not read
+  // again.
+  std::vector<install::ShelfSet> shelf = {shelf_set("s-bbbb", {merge_game("example-game-a", {k1})})};
+  p = install::plan_merge(shelf, merge_game("example-game-b", {k1}));
+  CHECK_EQ(p.fold, std::vector<size_t>{0});
+  CHECK_EQ(p.set_id, std::string("s-bbbb"));
+  CHECK_EQ(p.meta.games.size(), size_t{2});
+  CHECK_EQ(p.meta.discs.size(), size_t{1});
+  CHECK(p.new_disc_keys.empty());
+
+  // A game on that disc and another: the set grows by one disc.
+  p = install::plan_merge(shelf, merge_game("example-game-c", {k2, k1}));
+  CHECK_EQ(p.meta.discs.size(), size_t{2});
+  CHECK_EQ(p.new_disc_keys, std::vector<std::string>{k2});
+
+  // A game that bridges two sets folds both, and keeps the smaller id.
+  shelf.push_back(shelf_set("s-aaaa", {merge_game("example-game-d", {k2})}));
+  p = install::plan_merge(shelf, merge_game("example-game-e", {k1, k2}));
+  CHECK_EQ(p.fold, (std::vector<size_t>{1, 0}));
+  CHECK_EQ(p.set_id, std::string("s-aaaa"));
+  CHECK_EQ(p.meta.games.size(), size_t{3});
+  CHECK_EQ(p.meta.discs.size(), size_t{2});
+  CHECK(p.new_disc_keys.empty());
+
+  // A reinstall replaces the game rather than adding it twice.
+  p = install::plan_merge(shelf, merge_game("example-game-a", {k1}));
+  CHECK_EQ(p.meta.games.size(), size_t{1});
+  CHECK_EQ(p.set_id, std::string("s-bbbb"));
+
+  // Review Focus 1 of the media-set work: a game that moves. Reinstalled from
+  // another disc, it leaves its old set, which keeps its other games and drops
+  // the disc no game uses any more.
+  std::vector<install::ShelfSet> two = {
+      shelf_set("s-cccc", {merge_game("example-game-a", {k1}), merge_game("example-game-b", {k2})})};
+  p = install::plan_merge(two, merge_game("example-game-a", {k3}));
+  CHECK_EQ(p.fold, std::vector<size_t>{0});
+  CHECK_EQ(p.meta.games.size(), size_t{2});
+  bool has_k1 = false;
+  for (const Meta::Disc& d : p.meta.discs) has_k1 = has_k1 || d.key == k1;
+  CHECK(!has_k1);
+  CHECK_EQ(p.meta.discs.size(), size_t{2});
+  CHECK_EQ(p.new_disc_keys, std::vector<std::string>{k3});
+
+  // Review C1: a set keeps its first id when a reinstall moves it off the
+  // disc it was named after. A new set from that disc must not take the same
+  // id - writing it would replace the set that already has it.
+  std::vector<install::ShelfSet> renamed = {shelf_set(set_id_for({k1}, "x"), {merge_game("example-game-a", {k2})})};
+  install::MergePlan fresh = install::plan_merge(renamed, merge_game("example-game-b", {k1}));
+  CHECK(fresh.fold.empty());
+  CHECK(fresh.set_id != set_id_for({k1}, "x"));
+  CHECK_EQ(fresh.meta.set_id, fresh.set_id);
+  CHECK(id_is_safe(fresh.set_id));
+
+  // Review C2: a game left in two sets - a crash between a new set and the
+  // removal of the one it folded - comes out once when both are folded again.
+  std::vector<install::ShelfSet> twice = {shelf_set("s-dddd", {merge_game("example-game-b", {k1})}),
+                                          shelf_set("s-eeee", {merge_game("example-game-b", {k2})})};
+  install::MergePlan once = install::plan_merge(twice, merge_game("example-game-f", {k1, k2}));
+  CHECK_EQ(once.fold.size(), size_t{2});
+  CHECK_EQ(once.meta.games.size(), size_t{2});
+  CHECK_EQ(SetMeta::decode(once.meta.encode()).games.size(), size_t{2});
+
+  // Games come out sorted, as the encoder writes them.
+  CHECK(std::is_sorted(p.meta.games.begin(), p.meta.games.end(),
+                       [](const Meta& a, const Meta& b) { return a.id < b.id; }));
+  // And the plan's game is the one given, with its discs as the set has them.
+  const Meta* a = p.meta.find("example-game-a");
+  CHECK(a != nullptr && a->discs.size() == 1 && a->discs[0].key == k3);
+}
+
+// A folded set's games and discs, unpacked, go into the new body as they are:
+// the game being installed again is left behind, and so is a disc the set no
+// longer needs.
+static void test_collect_from_set(const fs::path& tmp) {
+  kgtest::section("a folded set's games and discs are carried into the new body");
+  fs::path from = tmp / "folded";
+  fs::remove_all(from);
+  kgtest::write_file(from / "games" / "example-game-a" / "game" / "game.exe", "MZ a");
+  kgtest::write_file(from / "games" / "example-game-a" / "registry.reg", "REGEDIT4\n");
+  kgtest::write_file(from / "games" / "example-game-b" / "game" / "game.exe", "MZ b");
+  kgtest::write_file(from / "games" / "example-game-c" / "game" / "game.exe", "MZ c");
+  kgtest::write_file(from / "games" / "example-game-c" / "system" / "windows" / "x.dll", "x");
+  kgtest::write_file(from / "discs" / "1111111111111111" / "SETUP.EXE", "MZ");
+  kgtest::write_file(from / "discs" / "2222222222222222" / "MOVIE.BIK", "m");
+  SetMeta s;
+  s.set_id = "s-aaaa";
+  Meta::Disc d1, d2;
+  d1.key = "1111111111111111";
+  d1.label = "DEMO_DISC_1";
+  d1.serial = 5;
+  d2.key = "2222222222222222";
+  s.discs = {d1, d2};
+  for (const char* id : {"example-game-a", "example-game-b", "example-game-c"}) {
+    Meta m;
+    m.id = id;
+    if (std::string(id) == "example-game-a") m.registry.fragment = "REGEDIT4\n";
+    s.games.push_back(m);
+  }
+  std::vector<install::BodyGame> games = {install::BodyGame{"example-game-new", tmp / "x", {}, ""}};
+  std::vector<install::BodyDisc> discs;
+  install::collect_from_set(from, s, "example-game-b", {"1111111111111111"}, games, discs);
+  CHECK_EQ(games.size(), size_t{3});
+  if (games.size() == 3) {
+    CHECK_EQ(games[1].id, std::string("example-game-a"));
+    CHECK_EQ(games[1].tree, from / "games" / "example-game-a" / "game");
+    CHECK(games[1].system.empty());
+    CHECK_EQ(games[1].registry, std::string("REGEDIT4\n"));
+    CHECK_EQ(games[2].id, std::string("example-game-c"));
+    CHECK_EQ(games[2].system, from / "games" / "example-game-c" / "system");
+  }
+  CHECK_EQ(discs.size(), size_t{1});
+  if (discs.size() == 1) {
+    CHECK_EQ(discs[0].key, std::string("1111111111111111"));
+    CHECK_EQ(discs[0].tree, from / "discs" / "1111111111111111");
+    CHECK_EQ(discs[0].label, std::string("DEMO_DISC_1"));
+    CHECK_EQ(discs[0].serial, 5u);
+  }
+  // A disc already on its way into the body is not taken twice, and neither is
+  // a game (review C2: one left in two sets by a crash).
+  install::collect_from_set(from, s, "example-game-b", {"1111111111111111"}, games, discs);
+  CHECK_EQ(discs.size(), size_t{1});
+  CHECK_EQ(games.size(), size_t{3});
+}
+
+static std::string test_dwarfs_tool() {
+  if (const char* t = std::getenv("KRETRO_DWARFS"); t && *t) return t;
+  if (fs::exists("build/dwarfs-universal")) return fs::absolute("build/dwarfs-universal").string();
+  return "";
+}
+
+// A copy install of `subdir` off a directory disc, the way the headless path
+// runs one, into the shelf under KRETRO_STATE.
+static install::Result install_copy_from_dir(const fs::path& disc_dir, const std::string& id,
+                                             const std::string& subdir) {
+  install::Build b(rt::Env{}, install::staging_dir(id), [](const std::string&) {});
+  b.adopt_discs({disc::open_directory(disc_dir)});
+  b.copy_from_disc(subdir);
+  Meta m;
+  m.id = id;
+  m.name = id;
+  m.run.exe = "game.exe";
+  m.recipe.method = "copy";
+  m.recipe.subdir = subdir;
+  m.discs = {install::disc_entry(b.discs()[0], "multi-disc")};
+  return b.write(std::move(m));
+}
+
+static void test_install_into_a_set(const fs::path& tmp) {
+  kgtest::section("a second game from the same disc joins its set, and the disc is stored once");
+  const std::string tool = test_dwarfs_tool();
+  if (tool.empty()) {
+    std::fprintf(stderr, "  skip: no dwarfs tool (build/dwarfs-universal or KRETRO_DWARFS) to pack with\n");
+    return;
+  }
+  const char* had = std::getenv("KRETRO_DWARFS");
+  const std::string saved = had ? had : "";
+  ::setenv("KRETRO_DWARFS", tool.c_str(), 1);
+
+  fs::path disc_dir = tmp / "multi-disc";
+  fs::remove_all(disc_dir);
+  kgtest::write_file(disc_dir / "GAMEA" / "game.exe", "MZ a" + std::string(40000, 'a'));
+  kgtest::write_file(disc_dir / "GAMEB" / "game.exe", "MZ b" + std::string(40000, 'b'));
+  kgtest::write_file(disc_dir / "SHARED" / "movie.bik", std::string(200000, 'm'));
+  install::Result ra = install_copy_from_dir(disc_dir, "example-game-a", "GAMEA");
+  CHECK_EQ(ra.set_games, std::vector<std::string>{"example-game-a"});
+  install::Result rb = install_copy_from_dir(disc_dir, "example-game-b", "GAMEB");
+  CHECK_EQ(ra.set_id, rb.set_id);
+  CHECK_EQ(rb.set_games, (std::vector<std::string>{"example-game-a", "example-game-b"}));
+  CHECK_EQ(game_set("example-game-a"), game_set("example-game-b"));
+  CHECK(rb.folded.empty());  // the set was rewritten in place, not folded away
+  Pack p = Pack::open(game_pack("example-game-b"));
+  CHECK_EQ(p.games().size(), size_t{2});
+  CHECK_EQ(p.set().discs.size(), size_t{1});
+  CHECK(p.verify().ok);
+  CHECK_EQ(p.game("example-game-a").tree.root(), ra.root);
+  CHECK_EQ(p.game("example-game-b").tree.root(), rb.root);
+  CHECK(p.set().discs[0].bytes >= 280000);
+  CHECK_EQ(install::installed_games().size(), size_t{2});
+
+  // Reinstalling a replaces it and keeps b.
+  install::Result ra2 = install_copy_from_dir(disc_dir, "example-game-a", "GAMEA");
+  Pack again = Pack::open(game_pack("example-game-a"));
+  CHECK_EQ(again.games().size(), size_t{2});
+  CHECK_EQ(ra2.root, ra.root);
+  CHECK(again.verify().ok);
+
+  for (const char* id : {"example-game-a", "example-game-b"}) fs::remove(game_index(id));
+  fs::remove(set_pack(ra.set_id));
+  if (had) ::setenv("KRETRO_DWARFS", saved.c_str(), 1);
+  else ::unsetenv("KRETRO_DWARFS");
+}
+
+// There is no pack without its discs: every disc entry is a disc the body
+// carries, keyed by what the disc is.
+static void test_every_disc_travels() {
+  kgtest::section("a pack always carries its discs");
+  disc::Disc d;
+  d.label = "DEMO_DISC";
+  d.source = "Example.zip";
+  d.info.size = 1000;
+  Meta::Disc e = install::disc_entry(d, "Example.zip#DEMO_DISC");
+  CHECK_EQ(e.key, disc_key(1000, d.info.prefix));
+  CHECK_EQ(e.label, std::string("DEMO_DISC"));
+  CHECK_EQ(e.ref, std::string("Example.zip#DEMO_DISC"));
+}
+
+// Review Focus 5 of the media-set work: a mounted CD is opened as a directory,
+// and a second game from it must land in the first one's set. That needs the
+// same key from every open of the same directory.
+static void test_disc_key_is_stable(const fs::path& tmp) {
+  kgtest::section("a directory disc has the same key every time it is opened");
+  fs::path dir = tmp / "keyed-disc";
+  fs::remove_all(dir);
+  kgtest::write_file(dir / "SETUP.EXE", "MZ");
+  kgtest::write_file(dir / "DATA" / "a.cab", std::string(5000, 'c'));
+  disc::Disc one = disc::open_directory(dir);
+  disc::Disc two = disc::open_directory(dir);
+  CHECK_EQ(disc_key(one.info.size, one.info.prefix), disc_key(two.info.size, two.info.prefix));
+  CHECK_EQ(install::disc_entry(one, "x").key, disc_key(one.info.size, one.info.prefix));
+  kgtest::write_file(dir / "DATA" / "b.cab", "another file");
+  CHECK(install::disc_entry(disc::open_directory(dir), "x").key != install::disc_entry(one, "x").key);
 }
 
 // The whole of defect (1): everything the installer wrote, not just the game
@@ -398,11 +793,10 @@ static void test_what_the_installer_wrote_outside_the_game(const fs::path& tmp) 
   CHECK_EQ(wine::restore_system_files(root / "nosuchtree", prefix_c), 0u);
 }
 
-// Defect (4): a pack built with "include the discs" unchecked still has to be a
-// pack - the game, the registry and now the system files - and still has to say
-// so honestly, which is Meta::Disc::embedded and not the body.
-static void test_a_body_without_discs_still_carries_everything_else(const fs::path& tmp) {
-  fs::path src = tmp / "no-discs";
+// A game with no disc at all - an installer somebody downloaded - is still a
+// whole game in its set: the tree, the registry and the system files.
+static void test_a_game_with_no_disc_is_still_whole(const fs::path& tmp) {
+  fs::path src = tmp / "no-disc";
   fs::remove_all(src);
   fs::path game = src / "tree";
   fs::create_directories(game);
@@ -414,16 +808,17 @@ static void test_a_body_without_discs_still_carries_everything_else(const fs::pa
   std::ofstream(system / "windows" / "system32" / "msvcrt.dll") << "a shared runtime";
 
   fs::path root = src / "body";
-  install::lay_out_body(root, game, {}, "REGEDIT4\n", system);
+  install::lay_out_set_body(root, {install::BodyGame{"example-game", game, system, "REGEDIT4\n"}}, {});
 
-  CHECK(fs::exists(root / "game" / "game.exe"));
-  CHECK(fs::exists(root / "system" / "windows" / "system32" / "msvcrt.dll"));
-  CHECK(fs::exists(root / "registry.reg"));
+  const fs::path in = root / "games" / "example-game";
+  CHECK(fs::exists(in / "game" / "game.exe"));
+  CHECK(fs::exists(in / "system" / "windows" / "system32" / "msvcrt.dll"));
+  CHECK(fs::exists(in / "registry.reg"));
   CHECK(!fs::exists(root / "discs"));
   // system/ is beside game/, never inside it: the Merkle root still means the
   // identity of the installed game and nothing else.
-  CHECK_EQ(to_hex(Tree::from_directory(root / "game").root()), to_hex(before.root()));
-  CHECK_EQ(Tree::from_directory(root / "game").size(), before.size());
+  CHECK_EQ(to_hex(Tree::from_directory(in / "game").root()), to_hex(before.root()));
+  CHECK_EQ(Tree::from_directory(in / "game").size(), before.size());
 }
 
 // A mounted CD is a directory, and so is a disc somebody already extracted -
@@ -536,11 +931,11 @@ static void test_a_directory_disc_travels_as_files(const fs::path& tmp) {
   fs::path game = tmp / "linked-game";
   fs::create_directories(game);
   std::ofstream(game / "game.exe") << "MZ";
-  std::vector<install::BodyDisc> discs = {install::BodyDisc{tree, "GAME CD", 0x1u, {}}};
   fs::path root = tmp / "linked-body";
-  install::lay_out_body(root, game, discs, "");
+  install::lay_out_set_body(root, {install::BodyGame{"example-game", game, {}, ""}},
+                            {install::BodyDisc{"1111111111111111", tree, "GAME CD", 0x1u, {}}});
 
-  fs::path in_body = root / "discs" / "1" / "MOVIE.BIK";
+  fs::path in_body = root / "discs" / "1111111111111111" / "MOVIE.BIK";
   CHECK(!fs::is_symlink(in_body, ec));
   // The builder's copy going away is exactly what shipping the pack does.
   fs::remove_all(outside, ec);
@@ -598,15 +993,12 @@ static void test_extraction_stamp(const fs::path& tmp) {
   Header flat_h;
   flat_h.blake3_root = hash_string("the game tree");
   Meta flat;
-  flat.layout = "flat";
   flat.body.blake3 = hash_string("the body bytes");
 
-  // The same install, laid out the way this build lays bodies out. Nothing else
-  // about it has changed - and it still may not be played from the flat tree,
-  // because the game is a directory down from where the flat tree has it.
-  Meta rooted = flat;
-  rooted.layout = "rooted";
-  CHECK(session::extraction_stamp(flat, flat_h) != session::extraction_stamp(rooted, flat_h));
+  // A tree unpacked by a build from before media sets was laid out another
+  // way, and its stamp said so; it may not be played from now.
+  const std::string old_stamp = "rooted " + to_hex(flat.body.blake3) + " " + to_hex(flat_h.blake3_root);
+  CHECK(session::extraction_stamp(flat, flat_h) != old_stamp);
 
   // A rebuild of the same game: same id, same layout, other bytes.
   Meta rebuilt = flat;
@@ -628,7 +1020,9 @@ static void test_extraction_stamp(const fs::path& tmp) {
   session::write_extraction_stamp(stamp, want);
   CHECK(session::extraction_stamp_matches(stamp, want));
   // The same tree is reused, and neither of the others is.
-  CHECK(!session::extraction_stamp_matches(stamp, session::extraction_stamp(rooted, flat_h)));
+  session::write_extraction_stamp(stamp, old_stamp);
+  CHECK(!session::extraction_stamp_matches(stamp, want));
+  session::write_extraction_stamp(stamp, want);
   CHECK(!session::extraction_stamp_matches(stamp, session::extraction_stamp(rebuilt, flat_h)));
 
   // Readable by a person, and one line.
@@ -636,7 +1030,7 @@ static void test_extraction_stamp(const fs::path& tmp) {
   std::string line;
   std::getline(f, line);
   CHECK_EQ(line, want);
-  CHECK_EQ(line, "flat " + to_hex(flat.body.blake3) + " " + to_hex(flat_h.blake3_root));
+  CHECK_EQ(line, "set " + to_hex(flat.body.blake3) + " " + to_hex(flat_h.blake3_root));
 
   // The stamp is a sibling of the unpacked tree, not a file inside it. For a
   // flat body that tree *is* the game directory, and the game directory is what
@@ -653,6 +1047,14 @@ static void test_extraction_stamp(const fs::path& tmp) {
 
   // Asking about a cache directory that does not exist is not an error.
   CHECK(!session::extraction_stamp_matches(tmp / "no-such-cache" / "x.stamp", want));
+
+  // A set's own cache is kretro's to replace, whatever is in it and with no
+  // stamp beside it; a directory of the same shape anywhere else is not.
+  const fs::path own = set_extract_dir("s-0123456789abcdef");
+  kgtest::write_file(own / "games" / "example-game" / "game" / "game.exe", "MZ");
+  CHECK(session::may_unpack_into(own, "s-0123456789abcdef"));
+  CHECK(!session::may_unpack_into(own, "s-fedcba9876543210"));
+  fs::remove_all(own);
 }
 
 // The tile a game gets on the shelf, and who is allowed to write it.
@@ -750,8 +1152,8 @@ static void test_one_kretro_per_game(const fs::path&) {
   }
   CHECK(!session::lock_game("adventure-ii").busy());
 
-  // The lock lives beside the layers it guards, so uninstalling the game takes
-  // it away with everything else under saves/<id>.
+  // The lock lives beside the layers it guards, under saves/<id> with
+  // everything else the game's sessions keep.
   CHECK_EQ(session::lock_file("adventure-ii").string(),
            (saves_dir() / "adventure-ii" / "lock").string());
 }
@@ -1154,16 +1556,11 @@ static void test_golden_journal() {
 
 static void test_golden_extraction_stamp() {
   Meta m;
-  m.layout = "flat";
   m.body.blake3 = golden_hash(0x11);
   Header h;
   h.blake3_root = golden_hash(0x22);
   CHECK_EQ(session::extraction_stamp(m, h),
-           std::string("flat 1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30 "
-                       "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"));
-  m.layout = "rooted";
-  CHECK_EQ(session::extraction_stamp(m, h),
-           std::string("rooted 1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30 "
+           std::string("set 1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30 "
                        "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"));
 }
 
@@ -1222,9 +1619,17 @@ int main() {
     test_cdrom_split();
     test_body_layout(tmp);
     test_what_the_installer_wrote_outside_the_game(tmp);
-    test_a_body_without_discs_still_carries_everything_else(tmp);
+    test_a_game_with_no_disc_is_still_whole(tmp);
     test_a_directory_is_a_disc(tmp);
     test_a_directory_disc_travels_as_files(tmp);
+    test_disc_key_is_stable(tmp);
+    test_every_disc_travels();
+    test_shelf_index(tmp);
+    test_index_points_nowhere(tmp);
+    test_import_refuses_a_game_in_another_set(tmp);
+    test_plan_merge();
+    test_collect_from_set(tmp);
+    test_install_into_a_set(tmp);
     test_registry_marker(tmp);
     test_extraction_stamp(tmp);
     test_title_art_belongs_to_the_game(tmp);

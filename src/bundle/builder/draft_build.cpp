@@ -1,10 +1,13 @@
 #include "draft_build.h"
 
+#include <algorithm>
 #include <ctime>
 #include <exception>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
+#include "../../pack/kgpack.h"
 #include "../../util/env.h"
 #include "../../util/paths.h"
 #include "../../util/pe.h"
@@ -12,6 +15,7 @@
 #include "exe_probe.h"
 #include "pack_facts.h"
 #include "player_base.h"
+#include "trim.h"
 
 namespace kg::bundle {
 namespace fs = std::filesystem;
@@ -36,6 +40,7 @@ std::string output_name(const Draft& d) { return d.id + "-" + d.version + ".run"
 
 BundleMeta meta_from_draft(const Draft& d, const std::vector<install::StoredKey>& keys,
                            const std::string& built_at, const std::vector<std::string>& licenses,
+                           const std::map<std::string, std::string>& sets,
                            const std::map<std::string, bool>& exe64) {
   BundleMeta m;
   m.id = d.id;
@@ -56,6 +61,7 @@ BundleMeta meta_from_draft(const Draft& d, const std::vector<install::StoredKey>
     gm.id = g.id;
     gm.name = g.name;
     gm.year = g.year;
+    if (auto s = sets.find(g.id); s != sets.end()) gm.set = s->second;
     gm.cover = g.cover;
     gm.backend = g.backend;
     gm.needs_gpu = g.needs_gpu;
@@ -77,7 +83,7 @@ BundleMeta meta_from_draft(const Draft& d, const std::vector<install::StoredKey>
 
 BuildInputs shelf_build_inputs(const fs::path& base) {
   return BuildInputs{.self = env_or_empty("KRETRO_SELF"),
-                     .games_dir = games_dir(),
+                     .state = state_dir(),
                      .keys_file = install::keys_file(),
                      .tool = env_or_empty("KRETRO_DWARFS"),
                      .cache = cache_dir(),
@@ -95,10 +101,32 @@ Built build_from_draft(const Draft& d, const BuildInputs& in, const Callbacks& c
   std::error_code ec;
   if (!fs::is_directory(d.out_dir, ec)) throw std::runtime_error(d.out_dir + " is not a folder");
 
-  std::vector<fs::path> packs;
+  // Each game's set, and each set once, in the order its first game comes.
+  std::vector<fs::path> shelf;          // per draft game: the set it is in
+  std::vector<fs::path> set_paths;      // each set once
+  std::vector<std::vector<std::string>> chosen;  // per set: the draft's games in it
   for (const DraftGame& g : d.games) {
-    fs::path p = find_pack_on_shelf(in.games_dir, g.id);
+    fs::path p = find_pack_on_shelf(in.state, g.id);
     if (p.empty()) throw std::runtime_error(g.display_name() + " is no longer on the shelf");
+    shelf.push_back(p);
+    auto it = std::find(set_paths.begin(), set_paths.end(), p);
+    if (it == set_paths.end()) {
+      set_paths.push_back(p);
+      chosen.push_back({g.id});
+    } else {
+      chosen[static_cast<size_t>(it - set_paths.begin())].push_back(g.id);
+    }
+  }
+  // A set whose every game is chosen goes in as it is on the shelf; one that
+  // is not is cut down to the chosen ones, so a player never carries a game
+  // its author did not choose.
+  std::vector<fs::path> packs;
+  std::map<std::string, std::string> sets;
+  const fs::path scratch = in.cache.empty() ? fs::path(d.out_dir) : in.cache;
+  for (size_t i = 0; i < set_paths.size(); ++i) {
+    fs::path p = trimmed_set(set_paths[i], chosen[i], in.tool, scratch, cb);
+    const std::string set = Pack::open(p).set().set_id;
+    for (const std::string& id : chosen[i]) sets[id] = set;
     packs.push_back(p);
   }
   BaseSource base = in.base.empty() ? find_player_base(in.self) : BaseSource::whole_file(in.base);
@@ -111,7 +139,7 @@ Built build_from_draft(const Draft& d, const BuildInputs& in, const Callbacks& c
   for (size_t i = 0; i < d.games.size(); ++i) {
     if (!d.games[i].embed_key || in.tool.empty()) continue;
     try {
-      pe::Imports im = read_exe_imports(read_pack_facts(packs[i]), in.tool,
+      pe::Imports im = read_exe_imports(read_pack_facts(shelf[i], d.games[i].id), in.tool,
                                         (in.cache.empty() ? fs::path(d.out_dir) : in.cache) / ".exe-scratch");
       if (im.ok) exe64[d.games[i].id] = im.is64;
     } catch (const std::exception&) {
@@ -119,7 +147,7 @@ Built build_from_draft(const Draft& d, const BuildInputs& in, const Callbacks& c
   }
 
   BundleMeta meta = meta_from_draft(d, install::load_keys(in.keys_file), when,
-                                    base_licenses(base, in.tool, in.cache), exe64);
+                                    base_licenses(base, in.tool, in.cache), sets, exe64);
   return build_bundle(base, meta, packs, in.out.empty() ? fs::path(d.out_dir) / output_name(d) : in.out, cb);
 }
 

@@ -17,11 +17,13 @@
 #include <vector>
 
 #include "install/build.h"
+#include "install/discs.h"
 #include "install/draft.h"
 #include "install/game_id.h"
 #include "install/keys.h"
 #include "install/manifest.h"
 #include "install/preset.h"
+#include "install/set_merge.h"
 #include "install/setup_ref.h"
 #include "install/source.h"
 #include "install/staging.h"
@@ -226,7 +228,6 @@ static void test_draft_to_meta() {
   d.width = 800;
   d.height = 600;
   d.dgvoodoo = true;
-  d.embed_discs = true;
 
   Meta m = install::draft_to_meta(d, discs);
 
@@ -241,7 +242,6 @@ static void test_draft_to_meta() {
   CHECK_EQ(m.run.windows_version, std::string("winxp"));
   CHECK(m.runtime.dgvoodoo);
   CHECK_EQ(m.install.install_dir, std::string("Program Files/Adventure II"));
-  CHECK_EQ(m.layout, std::string("rooted"));
 
   // "which exe on which disc" is split into the two fields the engine reads.
   CHECK_EQ(m.recipe.setup, std::string("Setup.exe"));
@@ -252,7 +252,9 @@ static void test_draft_to_meta() {
   CHECK_EQ(m.discs[0].source, std::string("/home/someone/discs/AdventureUSA.zip"));
   CHECK_EQ(m.discs[1].ref, std::string("AdventureUSA.zip#DEMO_PLAY"));
   CHECK_EQ(m.discs[1].serial, 0x33334444u);
-  CHECK(m.discs[1].embedded);
+  // Every disc is keyed by what it is, and every one travels: there is no
+  // pack without its discs any more.
+  CHECK_EQ(m.discs[0].key, disc_key(discs[0].info.size, discs[0].info.prefix));
   CHECK_EQ(m.recipe.discs.size(), 2u);
   CHECK_EQ(m.recipe.discs[1], std::string("AdventureUSA.zip#DEMO_PLAY"));
 
@@ -269,8 +271,8 @@ static void test_draft_to_meta() {
   CHECK_EQ(to_hex(m.recipe.fingerprints[1].blake3),
            to_hex(hash_string("the first 64 MB of the play disc")));
   // And they survive the trip into a pack, which is what export_recipe reads.
-  CHECK_EQ(Meta::decode(m.encode()).recipe.fingerprints.size(), 2u);
-  CHECK_EQ(to_hex(Meta::decode(m.encode()).recipe.fingerprints[1].blake3),
+  CHECK_EQ(SetMeta::decode(set_of(m).encode()).games[0].recipe.fingerprints.size(), 2u);
+  CHECK_EQ(to_hex(SetMeta::decode(set_of(m).encode()).games[0].recipe.fingerprints[1].blake3),
            to_hex(hash_string("the first 64 MB of the play disc")));
 
   // A pack with no disc behind it at all - a repacked installer somebody
@@ -279,24 +281,7 @@ static void test_draft_to_meta() {
 
   // The serial stays on this machine. The comment at the top of keys.h is the
   // policy; this is it being kept.
-  CHECK(m.encode().find("ABCD-1234-EFGH-5678") == std::string::npos);
-
-  // Unchecking the discs marks them, so play can say "needs the original disc"
-  // instead of looking for a discs/ that is not in the image.
-  install::Draft bare = d;
-  bare.embed_discs = false;
-  Meta without = install::draft_to_meta(bare, discs);
-  CHECK(!without.discs[0].embedded);
-  CHECK(!without.discs[1].embedded);
-  // And it is still a rooted body, because a body with the discs left out
-  // still carries game/, system/ and registry.reg - open_layers only looks for
-  // the game at image/game when the layout says so, and every one of those
-  // three is there whether the gigabytes came along or not.
-  CHECK_EQ(without.layout, std::string("rooted"));
-  // The discs are still named, still findable, and still fingerprinted: a pack
-  // built without them is exactly the pack you would export as a recipe.
-  CHECK_EQ(without.recipe.fingerprints.size(), 2u);
-  CHECK_EQ(without.discs[1].source, std::string("/home/someone/discs/AdventureUSA.zip"));
+  CHECK(set_of(m).encode().find("ABCD-1234-EFGH-5678") == std::string::npos);
 
   // The other three methods map onto the other three strings the engine takes.
   install::Draft c = d;
@@ -691,12 +676,13 @@ static void test_write_draft_verify(const fs::path& tmp) {
   // body: the engine says so rather than writing an envelope around nothing.
   CHECK_THROWS(b.write(d));
 
-  // The body was laid out before the packing that failed, and it is rooted:
-  // the game is at body/game, which is where session::open_layers looks
-  // for it and what the Merkle root is taken over. It is the confirmed
-  // directory that travelled, not drive_c.
-  CHECK(fs::exists(work / "body" / "game" / "Adventure II.exe"));
-  CHECK(fs::exists(work / "body" / "game" / "data.pak"));
+  // The body was laid out before the packing that failed, as a set: the game
+  // is at body/games/<id>/game, which is where session::open_layers looks for
+  // it and what the Merkle root is taken over. It is the confirmed directory
+  // that travelled, not drive_c.
+  const fs::path in_body = work / "body" / "games" / d.id / "game";
+  CHECK(fs::exists(in_body / "Adventure II.exe"));
+  CHECK(fs::exists(in_body / "data.pak"));
   CHECK(!fs::exists(work / "tree"));
   CHECK(!fs::exists(work / "prefix" / "drive_c" / "Program Files" / "Adventure II"));
 
@@ -738,7 +724,7 @@ static void test_root_advisory(const fs::path& tmp) {
   // The root is the root of game/, which is the value a recipe's expect_root
   // is written from and compared against.
   CHECK(fs::exists(res.pack, ec));
-  CHECK(res.root == Tree::from_directory(work / "body" / "game").root());
+  CHECK(res.root == Tree::from_directory(work / "body" / "games" / d.id / "game").root());
 
   // The comparison install::run makes, both ways round. A mismatch is a fact
   // reported and not a refusal - two people clicking through InstallShield
@@ -769,7 +755,8 @@ static void test_id_clash(const fs::path& tmp) {
 
   CHECK(!install::id_clash(e, "nothing-here").any());
 
-  std::ofstream(games_dir() / "packed.kgpack") << "x";
+  // On the shelf is having an index, whatever state the set it names is in.
+  write_game_index("packed", "s-0000000000000001");
   install::IdClash a = install::id_clash(e, "packed");
   CHECK(a.pack);
   CHECK(!a.saves);
@@ -784,9 +771,33 @@ static void test_id_clash(const fs::path& tmp) {
 
   // The suggestion is an edit for the user to accept, so it has to be free.
   CHECK_EQ(install::next_free_id(e, "packed"), std::string("packed-2"));
-  std::ofstream(games_dir() / "packed-2.kgpack") << "x";
+  write_game_index("packed-2", "s-0000000000000002");
   CHECK_EQ(install::next_free_id(e, "packed"), std::string("packed-3"));
   CHECK_EQ(install::next_free_id(e, "nothing-here"), std::string("nothing-here-2"));
+}
+
+// The build page says which discs are already on the shelf, carried by a set
+// this game will join, rather than counting them again.
+static void test_discs_on_shelf(const fs::path& tmp) {
+  disc::Disc d;
+  d.info.size = 4242;
+  d.info.prefix = hash_string("a disc on the shelf");
+  disc::Disc other = d;
+  other.info.size = 4343;
+  CHECK(install::discs_on_shelf({d, other}) == std::vector<bool>({false, false}));
+  Meta m;
+  m.id = "shelved-game";
+  m.tree = Tree::from_canonical("");
+  m.discs = {install::disc_entry(d, "Example.zip#DEMO_DISC")};
+  SetMeta s = set_of(m);
+  ensure_state_dirs();
+  std::ofstream(tmp / "shelf.body") << std::string(5000, 'x');
+  write_pack(set_pack(s.set_id), s, WriteOptions{PackKind::Game, tmp / "shelf.body", false});
+  std::vector<bool> on = install::discs_on_shelf({d, other});
+  CHECK_EQ(on.size(), size_t{2});
+  CHECK(on.size() == 2 && on[0]);
+  CHECK(on.size() == 2 && !on[1]);
+  fs::remove(set_pack(s.set_id));
 }
 
 // Opening the wizard from the game page or the Library's disc table means
@@ -1476,7 +1487,7 @@ static void test_copy_install(const fs::path& tmp) {
 
   // The verify list is read off what came off the disc, not off a drive_c
   // this method never touched. Read here rather than after the write, because
-  // lay_out_body consumes the tree: by the time there is a pack there is no
+  // lay_out_set_body consumes the tree: by the time there is a pack there is no
   // longer anything to read it from, which is exactly why write(Draft) takes
   // it before laying anything out.
   std::vector<std::string> v = install::verify_list(b.installed_root() / d.install_dir, d.exe);
@@ -1486,8 +1497,8 @@ static void test_copy_install(const fs::path& tmp) {
 
   install::Result res = b.write(d);
   CHECK(fs::exists(res.pack, ec));
-  CHECK(fs::exists(work / "body" / "game" / "game.exe"));
-  CHECK(res.root == Tree::from_directory(work / "body" / "game").root());
+  CHECK(fs::exists(work / "body" / "games" / d.id / "game" / "game.exe"));
+  CHECK(res.root == Tree::from_directory(work / "body" / "games" / d.id / "game").root());
 
   // The recipe that went into it. The pack itself cannot be opened here - the
   // stub above writes an empty body and Pack::open refuses one - so this is
@@ -1591,6 +1602,7 @@ int main() {
     test_write_draft_verify(tmp);
     test_root_advisory(tmp);
     test_id_clash(tmp);
+    test_discs_on_shelf(tmp);
     test_draft_from_meta(tmp);
     test_setup_ref_round_trip();
     test_bare_exe_sources(tmp);

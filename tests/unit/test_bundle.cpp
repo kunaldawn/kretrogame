@@ -51,6 +51,7 @@ namespace kg::bundle {
 using kgtest::flip_byte;
 using kgtest::make_base;
 using kgtest::make_pack;
+using kgtest::make_set;
 using kgtest::pack_meta;
 using kgtest::section;
 using kgtest::slurp;
@@ -96,11 +97,13 @@ static std::vector<Entry> three() {
 static fs::path make_recipe(const fs::path& tmp, const std::string& id) {
   fs::path out = tmp / "shelf" / (id + ".recipe.kgpack");
   fs::create_directories(out.parent_path());
-  write_pack(out, pack_meta(tmp, id), WriteOptions{kg::PackKind::Game, std::nullopt, false});
+  write_pack(out, set_of(pack_meta(tmp, id)), WriteOptions{kg::PackKind::Game, std::nullopt, false});
   return out;
 }
 
-static BundleMeta sample_meta(std::vector<std::string> ids) {
+// Each game with the set it plays from: by default the one-game set make_pack
+// writes for it.
+static BundleMeta sample_meta_sets(std::vector<std::pair<std::string, std::string>> games) {
   BundleMeta m;
   m.id = "retro-shelf-classics";
   m.title = "Retro Shelf Classics";
@@ -111,14 +114,23 @@ static BundleMeta sample_meta(std::vector<std::string> ids) {
   m.icon = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(10, 'i');
   m.rights_acknowledged = true;
   m.licenses = {"Wine: LGPL-2.1", "DXVK: zlib"};
-  for (const std::string& id : ids) {
+  for (const auto& [id, set] : games) {
     GameMeta g;
     g.id = id;
     g.name = "Game " + id;
     g.year = 1998;
+    g.set = set;
     m.games.push_back(g);
   }
   return m;
+}
+
+static std::string set_for(const std::string& id) { return kg::set_id_for({}, id); }
+
+static BundleMeta sample_meta(std::vector<std::string> ids) {
+  std::vector<std::pair<std::string, std::string>> games;
+  for (const std::string& id : ids) games.emplace_back(id, set_for(id));
+  return sample_meta_sets(games);
 }
 
 // --- the table of contents ---------------------------------------------------
@@ -480,7 +492,7 @@ static void test_legacy(const fs::path& tmp) {
   CHECK(g && !g->hashed);
   if (g) {
     Pack inside = Pack::open(p, t.at(*g), g->len);
-    CHECK_EQ(inside.meta().id, std::string("legacy-game"));
+    CHECK_EQ(inside.games()[0].id, std::string("legacy-game"));
     CHECK(inside.verify().ok);
   }
 
@@ -505,7 +517,7 @@ static void test_pack_in_a_range(const fs::path& tmp) {
   write_file(host, std::string(8192, 'H') + bytes + std::string(4096, 'N'));
   Pack p = Pack::open(host, 8192, bytes.size());
   CHECK_EQ(p.base(), 8192u);
-  CHECK_EQ(p.meta().id, std::string("ranged"));
+  CHECK_EQ(p.games()[0].id, std::string("ranged"));
   CHECK(p.verify().ok);
   fs::path out = tmp / "ranged.out";
   p.extract_body(out);
@@ -550,6 +562,9 @@ static void test_meta(const fs::path&) {
   CHECK_THROWS_WITH(BundleMeta::decode(m.encode()), "neither 32 nor 64");
   m.games[1].key->view = "";
 
+  // Every game names the set it plays from, and it comes back.
+  CHECK_EQ(back.games[1].set, set_for("example-game"));
+
   // The smallest a meta can be; everything optional is absent, not empty.
   BundleMeta small;
   small.id = "one";
@@ -557,6 +572,7 @@ static void test_meta(const fs::path&) {
   GameMeta g;
   g.id = "g";
   g.name = "G";
+  g.set = "s-0000000000000001";
   small.games.push_back(g);
   BundleMeta sb = BundleMeta::decode(small.encode());
   CHECK(sb == small);
@@ -578,9 +594,10 @@ static void test_meta(const fs::path&) {
     if (extra) { e.text("shiny_new_thing"); e.array(2); e.uint_val(1); e.text("x"); }
     e.text("licenses"); e.array(0);
     e.text("games"); e.array(1);
-    e.map(extra ? 4 : 3);
+    e.map(extra ? 5 : 4);
     e.text("id"); e.text("g");
     e.text("name"); e.text("G");
+    e.text("set"); e.text("s-0000000000000001");
     e.text("year");
     if (std::strcmp(year_type, "text") == 0) e.text("1998");
     else if (std::strcmp(year_type, "neg") == 0) e.int_val(-5);
@@ -617,6 +634,10 @@ static void test_meta(const fs::path&) {
       "cannot be placed");
   CHECK_THROWS_WITH(BundleMeta::decode(one_off([](BundleMeta& x) { x.games[0].key = GameMeta::Key{}; })),
                     "empty key");
+  // A game plays from a set the file carries; one that names none, or names
+  // something that cannot be a pack's name, cannot be played at all.
+  CHECK_THROWS_WITH(BundleMeta::decode(one_off([](BundleMeta& x) { x.games[1].set = ""; })), "no set");
+  CHECK_THROWS_WITH(BundleMeta::decode(one_off([](BundleMeta& x) { x.games[1].set = "../x"; })), "no set");
 
   // Shapes that are wrong from the top.
   cbor::Encoder arr;
@@ -697,11 +718,11 @@ static void test_build_and_verify(const fs::path& tmp) {
     CHECK_EQ(t.find(k)->blake3, bt.find(k)->blake3);
   }
   CHECK_EQ(slurp(out).substr(0, 2004), slurp(tmp / "in" / "bootstrap").substr(0, 2004));
-  // Packs are in the order given, named by their game ids, and byte for byte.
+  // Packs are in the order given, named by their sets, and byte for byte.
   std::vector<const Entry*> ps = t.all(Kind::Pack);
   CHECK_EQ(ps.size(), 2u);
-  CHECK_EQ(ps[0]->name, std::string("example-game"));
-  CHECK_EQ(ps[1]->name, std::string("classic2"));
+  CHECK_EQ(ps[0]->name, set_for("example-game"));
+  CHECK_EQ(ps[1]->name, set_for("classic2"));
   CHECK_EQ(ps[1]->blake3, hash_file(f2));
   CHECK_EQ(ps[1]->len, fs::file_size(f2));
   Pack inside = Pack::open(out, t.at(*ps[1]), ps[1]->len);
@@ -718,6 +739,38 @@ static void test_build_and_verify(const fs::path& tmp) {
   CHECK_EQ(read_toc(out).all(Kind::Pack).size(), 1u);
   CHECK_EQ(verify_bundle(out).meta.games.size(), 1u);
   (void)again;
+}
+
+// One disc, two games on it, and another game on its own disc: two sets in
+// the player, each carried once, and each game playing from its own.
+static void test_build_with_a_shared_set(const fs::path& tmp) {
+  section("a player carrying one set of two games and a set of one");
+  fs::path base = make_base(tmp);
+  fs::path shared = make_set(tmp, "s-00000000000000aa", {"example-game-a", "example-game-b"}, 30000);
+  fs::path alone = make_set(tmp, "s-00000000000000bb", {"example-game-c"}, 9000);
+  BundleMeta meta = sample_meta_sets({{"example-game-a", "s-00000000000000aa"},
+                                      {"example-game-b", "s-00000000000000aa"},
+                                      {"example-game-c", "s-00000000000000bb"}});
+  fs::path out = tmp / "out" / "sets-1.0.run";
+  fs::create_directories(out.parent_path());
+  Built b = build_bundle(BaseSource::whole_file(base), meta, {shared, alone}, out);
+  CHECK_EQ(b.toc.all(Kind::Pack).size(), size_t{2});
+  CHECK(b.toc.pack("s-00000000000000aa") != nullptr);
+  CHECK(b.toc.pack("example-game-a") == nullptr);
+  Verified v = verify_bundle(out);
+  CHECK_EQ(v.meta.games.size(), size_t{3});
+
+  // A set given with a game bundle.meta does not list is refused: a player
+  // carries what its author chose and nothing else.
+  BundleMeta two =
+      sample_meta_sets({{"example-game-a", "s-00000000000000aa"}, {"example-game-c", "s-00000000000000bb"}});
+  CHECK_THROWS_WITH(build_bundle(BaseSource::whole_file(base), two, {shared, alone}, out), "example-game-b");
+  // And a game whose set is not given.
+  CHECK_THROWS_WITH(build_bundle(BaseSource::whole_file(base), meta, {shared}, out), "s-00000000000000bb");
+  // And a game said to be in a set that does not hold it.
+  BundleMeta wrong = meta;
+  wrong.games[2].set = "s-00000000000000aa";
+  CHECK_THROWS_WITH(build_bundle(BaseSource::whole_file(base), wrong, {shared, alone}, out), "example-game-c");
 }
 
 // kretro carries the player base as its kind 6 entry; the builder finds it in
@@ -886,7 +939,7 @@ static void test_build_refuses(const fs::path& tmp) {
   auto nothing_left = [&] { return !fs::exists(out) && !fs::exists(fs::path(out.string() + ".partial")); };
 
   CHECK_THROWS_WITH(build_bundle(src, sample_meta({"classic2", "example-game"}), {f2}, out),
-                    "no pack was given for game example-game");
+                    "no pack was given for set " + set_for("example-game"));
   CHECK_THROWS_WITH(build_bundle(src, sample_meta({"classic2"}), {f2, example}, out), "does not list");
   CHECK_THROWS_WITH(build_bundle(src, sample_meta({"classic2"}), {f2, f2}, out), "given twice");
   CHECK_THROWS_WITH(build_bundle(src, sample_meta({"recipe-only"}), {make_recipe(tmp, "recipe-only")}, out),
@@ -939,7 +992,7 @@ static void test_build_refuses(const fs::path& tmp) {
   // pass, and the half-made player goes with it.
   fs::path rotten = make_pack(tmp, "rotten");
   flip_byte(rotten, Pack::open(rotten).header().body_off + 10);
-  CHECK_THROWS_WITH(build_bundle(src, sample_meta({"rotten"}), {rotten}, out), "game rotten is damaged");
+  CHECK_THROWS_WITH(build_bundle(src, sample_meta({"rotten"}), {rotten}, out), "(rotten) is damaged");
   CHECK(nothing_left());
 }
 
@@ -959,17 +1012,17 @@ static void test_verify_catches_damage(const fs::path& tmp) {
     return p;
   };
 
-  const Entry* example_e = t.pack("example-game");
+  const Entry* example_e = t.pack(set_for("example-game"));
   Pack example_pack = Pack::open(good, t.at(*example_e), example_e->len);
   // In a game's body: that game, by name.
   CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*example_e) + example_pack.header().body_off + 77)),
-                    "game example-game is damaged");
+                    "(example-game) is damaged");
   // In a game's metadata or header: still that game.
-  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*example_e) + 100)), "game example-game is damaged");
-  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*example_e) + 70)), "game example-game is damaged");
+  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*example_e) + 100)), "(example-game) is damaged");
+  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*example_e) + 70)), "(example-game) is damaged");
   // In the last byte of a game, which is the last byte of its body.
-  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*t.pack("classic2")) + t.pack("classic2")->len - 1)),
-                    "game classic2 is damaged");
+  const Entry* classic_e = t.pack(set_for("classic2"));
+  CHECK_THROWS_WITH(verify_bundle(damaged_at(t.at(*classic_e) + classic_e->len - 1)), "(classic2) is damaged");
   // In the runtime, the tools, the app, bundle.meta.
   CHECK_THROWS_WITH(verify_bundle(damaged_at(t.find(Kind::Runtime)->off + 4000)), "the runtime is damaged");
   CHECK_THROWS_WITH(verify_bundle(damaged_at(t.find(Kind::Tools)->off)), "the dwarfs tool is damaged");
@@ -987,11 +1040,11 @@ static void test_verify_catches_damage(const fs::path& tmp) {
     std::string bytes = slurp(good);
     std::vector<Entry> es = t.entries;
     for (Entry& e : es) {
-      if (e.name == "classic2") e.name = "classic1";
+      if (e.name == set_for("classic2")) e.name = set_for("classic1");
     }
     std::string body = bytes.substr(0, t.toc_off);
     write_file(p, craft(body, es));
-    CHECK_THROWS_WITH(verify_bundle(p), "the pack there is game classic2");
+    CHECK_THROWS_WITH(verify_bundle(p), "the pack there is set " + set_for("classic2"));
   }
   // bundle.meta and the table disagreeing about which games there are.
   {
@@ -999,7 +1052,7 @@ static void test_verify_catches_damage(const fs::path& tmp) {
     std::string body = bytes.substr(0, t.toc_off);
     std::vector<Entry> es;
     for (const Entry& e : t.entries) {
-      if (e.name != "example-game") es.push_back(e);
+      if (e.name != set_for("example-game")) es.push_back(e);
     }
     write_file(p, craft(body, es));
     CHECK_THROWS_WITH(verify_bundle(p), "bundle.meta lists game example-game");
@@ -1121,6 +1174,7 @@ static BundleMeta golden_bundle_meta(bool full) {
   g.id = "example-game";
   g.name = "Example Game";
   g.year = 1999;
+  g.set = "s-0001020304050607";
   g.backend = "dxvk";
   g.needs_gpu = true;
   g.display = "fit";
@@ -1145,23 +1199,24 @@ static void test_golden_meta() {
       "6776657273696f6e63312e30686275696c745f617474323032362d30312d30325430333a30343a30355a6e6b72657472"
       "6f5f76657273696f6e636465766662616e6e65724b89504e472062616e6e65726469636f6e4989504e472069636f6e73"
       "7269676874735f61636b6e6f776c6564676564f5686c6963656e736573827077696e652f434f5059494e472e4c49426c"
-      "6478766b2f4c4943454e53456567616d657381ab6269646c6578616d706c652d67616d65646e616d656c4578616d706c"
-      "652047616d6564796561721907cf65636f7665724a89504e4720636f766572676261636b656e64646478766b696e6565"
-      "64735f677075f567646973706c6179636669746a66756c6c73637265656ef56767616d6570616476613d52657475726e"
-      "0a73746172743d4573636170650a6a65787472615f646c6c7381a2646e616d656a443344496d6d2e646c6c6464617461"
-      "464d5a20646c6c636b6579a46576616c756573414243442d454647482d494a4b4c2d4d4e4f506d72656769737472795f"
-      "70617468783a484b45595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c65205075626c6973"
-      "6865725c4578616d706c652047616d656e72656769737472795f76616c75656543444b65796476696577623332";
+      "6478766b2f4c4943454e53456567616d657381ac6269646c6578616d706c652d67616d65646e616d656c4578616d706c"
+      "652047616d6564796561721907cf6373657472732d3030303130323033303430353036303765636f7665724a89504e47"
+      "20636f766572676261636b656e64646478766b696e656564735f677075f567646973706c6179636669746a66756c6c73"
+      "637265656ef56767616d6570616476613d52657475726e0a73746172743d4573636170650a6a65787472615f646c6c73"
+      "81a2646e616d656a443344496d6d2e646c6c6464617461464d5a20646c6c636b6579a46576616c756573414243442d45"
+      "4647482d494a4b4c2d4d4e4f506d72656769737472795f70617468783a484b45595f4c4f43414c5f4d414348494e455c"
+      "536f6674776172655c4578616d706c65205075626c69736865725c4578616d706c652047616d656e7265676973747279"
+      "5f76616c75656543444b65796476696577623332";
   CHECK_EQ(kgtest::to_hex(golden_bundle_meta(true).encode()), full);
 
   const std::string bare =
       "a966666f726d6174016269646e6578616d706c652d62756e646c65657469746c656e4578616d706c652042756e646c65"
       "6776657273696f6e63312e30686275696c745f617474323032362d30312d30325430333a30343a30355a6e6b72657472"
       "6f5f76657273696f6e63646576737269676874735f61636b6e6f776c6564676564f5686c6963656e736573827077696e"
-      "652f434f5059494e472e4c49426c6478766b2f4c4943454e53456567616d657381a86269646c6578616d706c652d6761"
-      "6d65646e616d656c4578616d706c652047616d6564796561721907cf676261636b656e64646478766b696e656564735f"
-      "677075f567646973706c6179636669746a66756c6c73637265656ef56a65787472615f646c6c7381a2646e616d656a44"
-      "3344496d6d2e646c6c6464617461464d5a20646c6c";
+      "652f434f5059494e472e4c49426c6478766b2f4c4943454e53456567616d657381a96269646c6578616d706c652d6761"
+      "6d65646e616d656c4578616d706c652047616d6564796561721907cf6373657472732d30303031303230333034303530"
+      "363037676261636b656e64646478766b696e656564735f677075f567646973706c6179636669746a66756c6c73637265"
+      "656ef56a65787472615f646c6c7381a2646e616d656a443344496d6d2e646c6c6464617461464d5a20646c6c";
   CHECK_EQ(kgtest::to_hex(golden_bundle_meta(false).encode()), bare);
 }
 
@@ -1219,6 +1274,7 @@ int main() {
     test_meta(tmp);
     test_gamepad_form();
     test_build_and_verify(tmp);
+    test_build_with_a_shared_set(tmp);
     test_build_from_kretro(tmp);
     test_base_helpers(tmp);
     test_build_cancel(tmp);

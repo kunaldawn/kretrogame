@@ -17,7 +17,6 @@ inline constexpr uint64_t kWarn4G = 4ull << 30;  // FAT32
 struct SizePart {
   std::string label;
   uint64_t bytes = 0;
-  uint64_t without_discs = 0;
 };
 
 struct SizeReport {
@@ -25,13 +24,14 @@ struct SizeReport {
   uint64_t meta = 0;            // bundle.meta: pictures and extra files
   std::vector<SizePart> games;
   uint64_t total = 0;
-  uint64_t total_without_discs = 0;
   std::vector<std::string> warnings;
 };
 
 // The file build_bundle would write, byte for byte when the sizes given are
 // the real ones: what the author uploads and what a FAT32 stick has to hold.
-// `base_bytes` is player_base_bytes of the base.
+// `base_bytes` is player_base_bytes of the base. Games of one set share one
+// pack, counted once under all their names; a set the player will carry
+// trimmed is counted whole, so the figure is then an upper bound.
 SizeReport size_report(uint64_t base_bytes, uint64_t meta_bytes,
                        const std::vector<const PackFacts*>& packs);
 

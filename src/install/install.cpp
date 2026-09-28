@@ -163,23 +163,14 @@ Result run(const rt::Env& e, Meta m, const Options& opt,
   }
 
   // The staging branch filled m.discs from the drive letters. Copy and unzip
-  // mounted nothing, and their packs carry their discs too - write() reads
-  // m.discs to decide whether the body carries them at all, so an empty list
-  // here would be a rooted body with an empty discs/ and a Meta that admits
-  // to no disc.
+  // mounted nothing, and their packs carry their discs too - write() lays out
+  // the discs m.discs names, so an empty list here would be a pack that
+  // admits to no disc.
   if (m.discs.empty()) {
     for (size_t i = 0; i < media.size(); ++i) {
-      m.discs.push_back(disc_entry(
-          media[i], i < m.recipe.discs.size() ? m.recipe.discs[i] : disc_ref_for(media[i]),
-          /*embedded=*/true));
+      m.discs.push_back(
+          disc_entry(media[i], i < m.recipe.discs.size() ? m.recipe.discs[i] : disc_ref_for(media[i])));
     }
-  }
-
-  // All discs or none - lay_out_body numbers them 1..n and every reader of the
-  // rooted layout takes Meta.discs[i] to be disc i+1, so this is one decision
-  // for the set, exactly as the wizard's single checkbox is.
-  if (!opt.embed_discs) {
-    for (Meta::Disc& d : m.discs) d.embedded = false;
   }
 
   Result res = b.write(m);

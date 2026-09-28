@@ -18,8 +18,12 @@ namespace kg::gui {
 struct Entry {
   std::string id, name;
   uint32_t year = 0;
+  // The set the game is in: a DVD's games share one pack, and pack_bytes is
+  // that whole set's.
   std::filesystem::path pack;
   uint64_t pack_bytes = 0;
+  std::string set_id;
+  size_t set_games = 1;
   uint64_t tree_bytes = 0;
   size_t files = 0;
 
@@ -42,21 +46,6 @@ struct Entry {
   // The archives the manifest names that are not in iso_dir(), so the game's
   // page can say which rather than "a disc".
   std::vector<std::string> missing_discs;
-
-  // What the pack says about the discs it was built from, for the one sentence
-  // the game's page owes a person before they press Play.
-  //
-  // A revision 1 pack has a flat body and carries no discs at all - there was
-  // nowhere in the body to put them - so it is not a pack that lost something,
-  // it is a pack made before packs carried discs. A rooted pack that names a
-  // disc it does not carry is the other case, and there are two ways to get
-  // one: it came from somewhere else, or the person who built it cleared
-  // "include the discs" on the wizard's build page, which is offered because a
-  // three-disc game is three discs of pack. Either way the disc is still named
-  // here, per disc. Both cases come out as labels; the page tells them apart by
-  // `flat_body`.
-  bool flat_body = false;
-  std::vector<std::string> absent_discs;
 };
 
 // Installed games first, then anything a manifest says could be installed.

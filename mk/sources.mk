@@ -17,7 +17,8 @@ LIB_SRC = $(DISC_SRC) src/config/config.cpp src/config/scaling.cpp src/util/hash
           src/install/draft.cpp src/install/setup_ref.cpp src/install/source.cpp \
           src/install/survey.cpp src/install/preset.cpp src/install/game_id.cpp \
           src/install/staging.cpp \
-          src/install/discs.cpp src/install/keys.cpp src/install/share.cpp
+          src/install/discs.cpp src/install/keys.cpp src/install/share.cpp \
+          src/install/set_merge.cpp
 # Wine's side of a prefix that is not the session's: the registry an
 # installer wrote, and the files it left on C: outside the game.
 WINE_SRC = src/wine/registry.cpp src/wine/system_files.cpp
@@ -49,10 +50,10 @@ LIB_SRC += $(PLAYER_LIB_SRC)
 # The Bundles page's decisions, apart from the page so the tests can reach them.
 BUILDER_SRC = src/bundle/builder/draft.cpp src/bundle/builder/draft_codec.cpp \
           src/bundle/builder/draft_store.cpp src/bundle/builder/pack_facts.cpp \
-          src/bundle/builder/repack.cpp src/bundle/builder/exe_probe.cpp \
+          src/bundle/builder/exe_probe.cpp \
           src/bundle/builder/key_fragment.cpp src/bundle/builder/checks.cpp \
           src/bundle/builder/size_report.cpp src/bundle/builder/player_base.cpp \
-          src/bundle/builder/draft_build.cpp src/bundle/builder/preview.cpp
+          src/bundle/builder/draft_build.cpp src/bundle/builder/preview.cpp src/bundle/builder/trim.cpp
 LIB_SRC += $(BUILDER_SRC)
 
 IMGUI_SRC = $(IMGUI)/imgui.cpp $(IMGUI)/imgui_draw.cpp $(IMGUI)/imgui_tables.cpp \
@@ -168,6 +169,8 @@ FORMAT_CLEAN = \
                src/apps/player/commands.cpp \
                src/apps/player/commands.h \
                src/apps/player/main.cpp \
+               src/bundle/builder/trim.cpp \
+               src/bundle/builder/trim.h \
                src/cli/cli.h \
                src/cli/command.h \
                src/cli/commands.cpp \
@@ -204,6 +207,8 @@ FORMAT_CLEAN = \
                src/gui/session_log.cpp \
                src/gui/session_log.h \
                src/gui/status_bar.cpp \
+               src/install/set_merge.cpp \
+               src/install/set_merge.h \
                src/pack/dwarfs.cpp \
                src/pack/dwarfs.h \
                src/session/input_helper.cpp \

@@ -26,8 +26,6 @@
 #   KRETRO_TEST_GAMES     ids whose manifests install unattended (method "copy"
 #                         or "unzip", one disc named by `iso`); two or more
 #                         also test that damage to one game spares the others
-#   KRETRO_TEST_NO_DISCS  ids to pack without their disc, for a disc that is
-#                         mostly other games
 set -uo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 load_local_env
@@ -81,12 +79,8 @@ echo "bundle: ${GAMES[*]}"
 
 # --- the installs -------------------------------------------------------------
 for id in "${GAMES[@]}"; do
-  # A disc that is mostly other games - a compilation - would make the pack
-  # gigabytes of games it is not: KRETRO_TEST_NO_DISCS packs those without.
-  extra=()
-  case " ${KRETRO_TEST_NO_DISCS:-} " in *" $id "*) extra=(--no-discs) ;; esac
-  if author install "$id" --headless "${extra[@]}" >"$WORK/install-$id.log" 2>&1; then
-    ok "$id installs headless ($(du -h "$WORK/shelf/games/$id.kgpack" | cut -f1))"
+  if author install "$id" --headless >"$WORK/install-$id.log" 2>&1; then
+    ok "$id installs headless ($(du -h "$WORK/shelf/packs/$(cat "$WORK/shelf/games/$id.set").kgpack" | cut -f1))"
   else
     bad "$id did not install"; show "$WORK/install-$id.log"
     finish; exit 1
@@ -144,18 +138,26 @@ for i in range(int.from_bytes(toc[8:12], "little")):
 EOF
 [ -s "$WORK/toc.txt" ] || { bad "the table could not be read: $(cat "$WORK/toc.err")"; finish; exit 1; }
 
+# A pack is a set: games from one disc share it, so the player carries each
+# set once, in the order its first game was asked for.
+set_of() { cat "$WORK/shelf/games/$1.set"; }
+SETS=()
+for id in "${GAMES[@]}"; do
+  s="$(set_of "$id")"
+  case " ${SETS[*]} " in *" $s "*) ;; *) SETS+=("$s") ;; esac
+done
 is_kinds="$(cut -d' ' -f1 "$WORK/toc.txt" | paste -sd' ')"
-want_kinds="tools runtime app meta$(printf ' pack%.0s' "${GAMES[@]}")"
+want_kinds="tools runtime app meta$(printf ' pack%.0s' "${SETS[@]}")"
 [ "$is_kinds" = "$want_kinds" ] && ok "the table is $is_kinds" || bad "the table is '$is_kinds', not '$want_kinds'"
 packs="$(awk '$1 == "pack" { print $2 }' "$WORK/toc.txt" | paste -sd' ')"
-[ "$packs" = "${GAMES[*]}" ] && ok "its packs are the games asked for, in order: $packs" \
-                               || bad "its packs are '$packs', not '${GAMES[*]}'"
+[ "$packs" = "${SETS[*]}" ] && ok "its packs are the sets of the games asked for, in order: $packs" \
+                              || bad "its packs are '$packs', not '${SETS[*]}'"
 
 # Each pack: the shelf's bytes exactly, the BLAKE3 its entry says, and the
 # tree root the shelf's pack has, read back out of the copy.
 while read -r kind name off len hash; do
   [ "$kind" = pack ] || continue
-  shelf="$WORK/shelf/games/$name.kgpack"
+  shelf="$WORK/shelf/packs/$name.kgpack"
   [ "$len" = "$(stat -c %s "$shelf")" ] || { bad "$name: the entry is $len bytes, the shelf's pack $(stat -c %s "$shelf")"; continue; }
   if cmp -s -n "$len" -i "$off:0" "$PLAYER" "$shelf"; then
     ok "$name: the pack inside is the shelf's, byte for byte ($len bytes at +$off)"
@@ -241,7 +243,9 @@ left="$(our_mounts | grep -v '/kretro/rt-' || true)"
 # game hashes its pack and must say it is damaged, and only that game.
 DAMAGED="$WORK/out/damaged.run"
 cp --reflink=auto "$PLAYER" "$DAMAGED"
-read -r _ first off len _ < <(awk '$1 == "pack"' "$WORK/toc.txt" | head -n 1)
+read -r _ first_set off len _ < <(awk '$1 == "pack"' "$WORK/toc.txt" | head -n 1)
+# The first game of that set; every game of the set shares its fate.
+for id in "${GAMES[@]}"; do [ "$(set_of "$id")" = "$first_set" ] && { first="$id"; break; }; done
 python3 -c "
 f = open('$DAMAGED', 'r+b'); f.seek($off + $len // 2); b = f.read(1); f.seek(-1, 1); f.write(bytes([b[0] ^ 0x40]))"
 S2="$WORK/stranger2"
@@ -259,6 +263,13 @@ fi
 [ "${#GAMES[@]}" -gt 1 ] || note "one game only (one id in KRETRO_TEST_GAMES, or only one disc here): that the others still play is not tested here"
 for id in "${GAMES[@]}"; do
   [ "$id" = "$first" ] && continue
+  if [ "$(set_of "$id")" = "$first_set" ]; then
+    dry_run "$S2" "$id" "$WORK/damaged-$id.log"; rc=$?
+    grep -q "is damaged inside this file" "$WORK/damaged-$id.log" \
+      && ok "$id, in the same set as $first, is called damaged too" \
+      || { bad "$id shares $first's damaged set and was not called damaged"; show "$WORK/damaged-$id.log"; }
+    continue
+  fi
   dry_run "$S2" "$id" "$WORK/damaged-$id.log"; rc=$?
   verdict="$(grep -m1 -o 'is ready to play\|has to be unpacked\|cannot mount' "$WORK/damaged-$id.log" || true)"
   if grep -q "is damaged" "$WORK/damaged-$id.log"; then

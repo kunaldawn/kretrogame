@@ -29,5 +29,5 @@
 #include "builder/pack_facts.h"
 #include "builder/player_base.h"
 #include "builder/preview.h"
-#include "builder/repack.h"
 #include "builder/size_report.h"
+#include "builder/trim.h"

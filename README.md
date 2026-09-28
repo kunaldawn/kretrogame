@@ -40,8 +40,10 @@ distributions alike, including Alpine.
 - **Installers run as intended.** The game's own setup program runs inside
   kretro's window with every disc of the set mounted as a CD-ROM drive that
   carries the original volume label and serial number.
-- **One file per game.** An installed game is a single DwarFS-based pack with a
-  Merkle root, mounted rather than copied when played.
+- **One file per disc set.** An installed game is kept in a single DwarFS-based
+  pack with its discs, mounted rather than copied when played. A DVD or zip
+  holding several games is one pack, with the disc stored once and each game
+  installed into it as you install it.
 - **One file to distribute.** A player bundles the runtime and any number of
   games, with a launcher, per-game settings and optional cover art.
 - **Portable.** Runs on any x86-64 Linux distribution with a Wayland or X11
@@ -158,8 +160,9 @@ steps:
    directory is the game.
 6. **Launch**: choose the executable that starts the game, and any arguments.
 7. **Presentation**: set the resolution and display settings.
-8. **Build**: write the pack, optionally including the disc images so that
-   games that check for their disc can find it.
+8. **Build**: write the pack, with the disc images, so that games that check
+   for their disc find it. A disc already on the shelf - another game from the
+   same DVD - is not stored again: the game joins the pack that holds it.
 
 Games that install by copying or unpacking can be installed without a display
 using `kretro install <id> --headless`, provided a manifest (see below)
@@ -217,12 +220,12 @@ kretro bundle rebuild <id>      # rebuild a remembered bundle
 |---|---|
 | `kretro` | Open the graphical interface. |
 | `kretro create` | Install a game with the wizard. |
-| `kretro install <id> [--headless] [--force] [--keep-tree] [--no-discs]` | Install a game described by a manifest. |
+| `kretro install <id> [--headless] [--force] [--keep-tree]` | Install a game described by a manifest. |
 | `kretro scan [dir] [--write-db]` | Identify every disc image in a directory. |
 | `kretro identify <image>` | Identify one disc image. |
 | `kretro contents <archive[#LABEL]>` | List the files on a disc. |
 | `kretro games` | List manifests and whether their discs are present. |
-| `kretro list` | List installed games. |
+| `kretro list` | List installed games, with the set (the pack) each is in. |
 | `kretro play <id> [--fullscreen] [--integer\|--fit\|--native] [--scale N] [--dry-run] [--note TEXT]` | Play a game. |
 | `kretro show <id>` | Open the graphical interface on one game. |
 | `kretro display <id>` | Show how a game will be scaled on this screen. |
@@ -238,7 +241,6 @@ kretro bundle rebuild <id>      # rebuild a remembered bundle
 | `kretro import-saves <id> <file>` | Import saves. |
 | `kretro bundle build\|list\|rebuild ...` | Build players (see above). |
 | `kretro verify <id>` | Verify a pack's integrity. |
-| `kretro uninstall <id>` | Remove an installed game. |
 | `kretro doctor [--save FILE]` | Check this machine's capabilities. |
 | `kretro info` | Show runtime and data paths. |
 | `kretro wine [args...]` | Run the bundled Wine. |
@@ -393,9 +395,10 @@ Before distributing a player, make sure that:
   general-purpose launchers. It may only be added to an individual game by the
   author.
 
-A player's size is roughly the 380 MB player base plus the size of each game's
-pack. Packs may include disc images, which are deduplicated against the
-installed files. The Bundles page shows the exact size before building.
+A player's size is roughly the 380 MB player base plus the size of each set it
+carries. A set carries its disc images once, deduplicated against the
+installed files; a set only some of whose games are chosen is trimmed to those
+games and the discs they use. The Bundles page shows the size before building.
 
 ## Known limitations
 

@@ -54,7 +54,6 @@ struct Draft {
 
   uint32_t width = 640, height = 480;
   bool dgvoodoo = false;
-  bool embed_discs = true;
 };
 
 // recipe.method, as it is written into a pack and a manifest. One string per

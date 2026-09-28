@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "header.h"
 #include "pack_meta.h"
@@ -22,7 +24,10 @@ class Pack {
   static Pack open(const std::filesystem::path& p, uint64_t off, uint64_t len);
 
   const Header& header() const { return header_; }
-  const Meta& meta() const { return meta_; }
+  const SetMeta& set() const { return set_; }
+  const std::vector<Meta>& games() const { return set_.games; }
+  // One game of the set; throws naming the file when it carries no such game.
+  const Meta& game(std::string_view id) const;
   const std::filesystem::path& path() const { return path_; }
   // Where the pack's first byte is in path(): zero for a pack that is a file of
   // its own. The body is at base() + header().body_off, which is the number a
@@ -41,7 +46,7 @@ class Pack {
     bool body_matches = false;
     std::string detail;
   };
-  // Checks the header's root against the metadata's tree, and the body's hash
+  // Checks the header's root against the set's games' trees, and the body's hash
   // against what the metadata claims. Does not need the body extracted.
   Verification verify() const;
 
@@ -49,7 +54,7 @@ class Pack {
   std::filesystem::path path_;
   uint64_t base_ = 0;
   Header header_;
-  Meta meta_;
+  SetMeta set_;
 };
 
 struct WriteOptions {
@@ -59,8 +64,9 @@ struct WriteOptions {
   bool body_is_squashfs = false;
 };
 
-// Writes a complete pack. The header's blake3_root is taken from meta.tree, and
-// meta.body is filled in from the body file, so callers cannot forget either.
-void write_pack(const std::filesystem::path& out, Meta meta, const WriteOptions& opt);
+// Writes a complete pack. The header's blake3_root is taken from the set's
+// games, and set.body is filled in from the body file, so callers cannot forget
+// either.
+void write_pack(const std::filesystem::path& out, SetMeta set, const WriteOptions& opt);
 
 }  // namespace kg

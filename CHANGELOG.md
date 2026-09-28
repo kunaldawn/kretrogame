@@ -44,6 +44,15 @@ All notable changes to kretrogame are recorded here. The format follows
 
 ### Changed
 
+- **Packs are media sets.** A pack holds every disc of a set once and every
+  game installed from those discs, so a DVD or zip holding several games is
+  stored once on the shelf and once in a player. Installing a game whose disc
+  is already on the shelf adds it to that pack; a game whose discs span two
+  packs makes them one. A player carries each set once, trimmed to the games
+  chosen when not all of them are. The pack format is container revision 3;
+  packs made before are refused, and their games have to be installed again.
+  The shelf keeps sets under `packs/` and a one-line index per game under
+  `games/`.
 - The bootstrap reads a table of contents, runs DwarFS from memory rather
   than from disk, and runs on a noexec `/tmp` or cache.
 - The source tree is laid out for maintenance: build scripts live in
@@ -146,6 +155,12 @@ All notable changes to kretrogame are recorded here. The format follows
 
 ### Removed
 
+- `kretro uninstall` and the game page's Uninstall: a game, once in a set,
+  stays there.
+- Packing a game without its discs (the wizard's "include the discs" and
+  `kretro install --no-discs`), and with it the "needs the original disc"
+  states and the Bundles page's "without discs" size.
+- "Repack for faster loading": every pack is packed that way now.
 - `kretro export --standalone`. A one-game player replaces it.
 - Every trace of a particular game collection from the repository: the
   manifests in `games/`, the disc list in `db/`, and game names in code,

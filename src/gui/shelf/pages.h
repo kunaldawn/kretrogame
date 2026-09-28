@@ -115,22 +115,13 @@ class GamePage : public Page {
   void draw() override;
 
  private:
-  void uninstall_modal(const Entry& e);
-
   ShelfContext& ctx_;
   WizardPage& wizard_;
-  bool confirm_uninstall_ = false;
-  bool also_saves_ = false;
   // The game's journal and snapshots as last read, and when to read them
   // again.
   Refresh disk_;
   std::vector<session::Record> journal_;
   std::vector<std::string> gens_;
-  // What the Uninstall? question says goes, measured as it came up.
-  uint64_t prefix_bytes_ = 0, save_bytes_ = 0;
-  // An uninstall reads the collection again, and that replaces the entry
-  // draw() is still drawing from; so it waits for the end of the frame.
-  bool reload_after_draw_ = false;
 };
 
 // A .kgpack, what it is, and taking it in.
@@ -153,7 +144,8 @@ class ImportPage : public Page {
   struct Inspected {
     std::filesystem::path of;    // the file this describes; empty means nothing
     std::string trouble;         // why it could not be read, when it could not
-    Meta meta;
+    Meta meta;                   // the set's first game, which the page names
+    std::vector<std::string> games;  // every game of the set, by id
     bool has_body = false;
     Hash root{};
     uint64_t bytes = 0;
@@ -170,8 +162,8 @@ class ImportPage : public Page {
   std::filesystem::path drop_path_;
   bool import_replace_ = false;
   // The Import page's own file list, and where it is looking. Started at the
-  // user's home rather than at games_dir(): a pack somebody sent you is in
-  // Downloads, and a pack already in games_dir() is already installed.
+  // user's home rather than at packs_dir(): a pack somebody sent you is in
+  // Downloads, and a pack already in packs_dir() is already installed.
   bool import_browsing_ = false;
   std::filesystem::path import_dir_ = home_dir();
   // Whether the pack's game is installed, and how long it has been played,

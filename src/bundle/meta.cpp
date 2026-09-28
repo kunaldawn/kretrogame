@@ -93,8 +93,9 @@ void BundleMeta::validate() const {
   for (size_t i = 0; i < games.size(); ++i) {
     const GameMeta& g = games[i];
     std::string where = game_where(i, g.id);
-    // The table of contents names each pack by this id in 64 bytes.
     if (!kg::id_is_safe(g.id) || g.id.size() > kNameSize) bad(where + " has an id that cannot be used here");
+    // The table of contents names each pack by its set, in 64 bytes.
+    if (!kg::id_is_safe(g.set) || g.set.size() > kNameSize) bad(where + " has no set it can be played from");
     if (std::find(seen.begin(), seen.end(), g.id) != seen.end()) bad("two games are called " + g.id);
     seen.push_back(g.id);
     if (g.name.empty()) bad(where + " has no name");
@@ -148,11 +149,12 @@ std::string BundleMeta::encode() const {
   e.text("games");
   e.array(games.size());
   for (const GameMeta& g : games) {
-    size_t n = 8 + (g.cover.empty() ? 0 : 1) + (g.gamepad.empty() ? 0 : 1) + (g.key ? 1 : 0);
+    size_t n = 9 + (g.cover.empty() ? 0 : 1) + (g.gamepad.empty() ? 0 : 1) + (g.key ? 1 : 0);
     e.map(n);
     e.text("id"); e.text(g.id);
     e.text("name"); e.text(g.name);
     e.text("year"); e.uint_val(g.year);
+    e.text("set"); e.text(g.set);
     if (!g.cover.empty()) { e.text("cover"); e.bytes(g.cover.data(), g.cover.size()); }
     e.text("backend"); e.text(g.backend);
     e.text("needs_gpu"); e.boolean(g.needs_gpu);
@@ -218,6 +220,7 @@ BundleMeta BundleMeta::decode(std::string_view data) {
     uint64_t year = f.uint("year");
     if (year > UINT32_MAX) bad("'year' of " + f.where + " is " + std::to_string(year) + ", which is not a year");
     g.year = static_cast<uint32_t>(year);
+    g.set = f.text("set");
     g.cover = f.bytes("cover");
     g.backend = f.text("backend", false, "auto");
     g.needs_gpu = f.boolean("needs_gpu");

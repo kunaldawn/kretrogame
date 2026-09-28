@@ -34,6 +34,8 @@ struct Bundle {
   static Bundle open(const std::filesystem::path& self, const std::string& toc_env = "");
 
   const bundle::GameMeta* game(const std::string& id) const;
+  // The entry of the set game `id` plays from, or null when the file carries
+  // no such game. Games of one disc share one entry.
   const bundle::Entry* pack(const std::string& id) const;
   // "example-game, other-game" for a message about a game that is not here.
   std::string game_list() const;

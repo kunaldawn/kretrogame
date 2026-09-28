@@ -81,39 +81,23 @@ void Bundles::games_step() {
       ImGui::TableSetColumnIndex(3);
       warn_text("no longer on the shelf");
     } else {
-      // Installed before packs stored what is already compressed raw, in
-      // 4 MiB blocks: it plays, from a mount that reads more slowly.
-      if (packed_before_faster_loading(*f)) {
-        if (repacking_ == g.id) {
-          spinner();
-          ImGui::SameLine();
-          ImGui::TextDisabled("repacking...");
-        } else {
-          // A quiet button, dim and unfilled, under the title: an offer that
-          // can wait, not the row's subject.
-          ImGui::BeginDisabled(repacker_.joinable() || worker_.joinable());
-          ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-          ImGui::PushStyleColor(ImGuiCol_Button, alpha(kBg0, 0.0f));
-          ImGui::PushStyleColor(ImGuiCol_Border, kLine);
-          const bool repack = small_button("Repack for faster loading");
-          ImGui::PopStyleColor(3);
-          if (repack) start_repack(g.id);
-          ImGui::EndDisabled();
-          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Packed before kretro stored packs for fast reads. Repacking keeps the game "
-                              "exactly as it is - the same files, the same Merkle root, the same saves - and "
-                              "changes only how its pack stores them.");
-          }
-        }
-      }
       ImGui::TableSetColumnIndex(2);
       right_aligned(human_size(f->bytes));
       ImGui::TableSetColumnIndex(3);
-      std::string discs = f->discs_carried ? "carries " + std::to_string(f->discs_carried) + " disc" +
-                                                 (f->discs_carried == 1 ? "" : "s")
-                                           : "carries no discs";
-      if (f->discs_named) discs += ", needs " + std::to_string(f->discs_named) + " it does not carry";
-      colored_text(kDim, discs);
+      const size_t n = f->meta.discs.size();
+      std::string what = n ? "carries " + std::to_string(n) + " disc" + (n == 1 ? "" : "s") : "carries no discs";
+      // Games of one disc share one pack. Chosen together, the pack goes in
+      // whole; chosen apart, it is cut down to the ones chosen at build time.
+      if (f->set_games > 1) {
+        const size_t chosen = static_cast<size_t>(std::count_if(draft_.games.begin(), draft_.games.end(), [&](const DraftGame& o) {
+          const PackFacts* of = facts_for(o.id);
+          return of && of->set_id == f->set_id;
+        }));
+        what += chosen < f->set_games ? ", will be trimmed to the games chosen"
+                                      : ", shares a pack with " + std::to_string(f->set_games - 1) + " other game" +
+                                            (f->set_games == 2 ? "" : "s");
+      }
+      colored_text(kDim, what);
     }
     ImGui::TableSetColumnIndex(4);
     ImGui::BeginDisabled(i == 0);
@@ -144,15 +128,6 @@ void Bundles::games_step() {
     dirty_ = true;
   }
   if (draft_.games.empty()) ImGui::TextDisabled("No games yet: add some from the shelf below.");
-  {
-    std::string err, note = repack_note_;
-    {
-      std::lock_guard<std::mutex> lk(build_mutex_);
-      err = repack_error_;
-    }
-    if (!err.empty()) badge_line(BadgeKind::Fail, err);
-    if (!note.empty()) badge_line(BadgeKind::Ok, note);
-  }
 
   section("on your shelf");
   auto offered = [&](const Entry& e) {
@@ -188,63 +163,11 @@ void Bundles::games_step() {
     ImGui::TableSetColumnIndex(2);
     right_aligned(human_size(f->bytes));
     ImGui::TableSetColumnIndex(3);
-    ImGui::TextDisabled("%s", f->discs_carried ? "with its discs" : "no discs");
+    ImGui::TextDisabled("%s", f->meta.discs.empty() ? "no discs" : "with its discs");
     ImGui::PopID();
   }
   if (shelf) ImGui::EndTable();
   if (!any) ImGui::TextDisabled(shelf_.empty() ? "Nothing is installed yet." : "Every installed game is in this bundle.");
-}
-
-void Bundles::start_repack(const std::string& id) {
-  if (repacker_.joinable() || worker_.joinable()) return;
-  const PackFacts* f = facts_for(id);
-  if (!f) return;
-  repacking_ = id;
-  repack_note_.clear();
-  {
-    std::lock_guard<std::mutex> lk(build_mutex_);
-    repack_error_.clear();
-  }
-  repack_done_ = false;
-  cancel_ = false;
-  fs::path pack = f->path, tool = env_or_empty("KRETRO_DWARFS"), scratch = cache_dir() / "repack";
-  repacker_ = std::thread([this, pack, tool, scratch] {
-    std::string err;
-    try {
-      Callbacks cb;
-      cb.cancelled = [this] { return cancel_.load(); };
-      repack_for_faster_loading(pack, tool, scratch, cb);
-    } catch (const Cancelled&) {
-      err = "Repack cancelled; the pack is as it was.";
-    } catch (const std::exception& ex) {
-      err = ex.what();
-    }
-    std::lock_guard<std::mutex> lk(build_mutex_);
-    repack_error_ = err;
-    repack_done_ = true;
-  });
-}
-
-void Bundles::pump_repack() {
-  if (!repacker_.joinable() || !repack_done_) return;
-  repacker_.join();
-  repack_done_ = false;
-  const std::string id = repacking_;
-  repacking_.clear();
-  std::string err;
-  {
-    std::lock_guard<std::mutex> lk(build_mutex_);
-    err = repack_error_;
-  }
-  // The pack's size and body changed; its tree did not.
-  if (auto it = facts_.find(id); it != facts_.end()) {
-    try {
-      it->second = read_pack_facts(it->second.path);
-    } catch (const std::exception&) {
-    }
-    if (err.empty()) repack_note_ = "Repacked " + it->second.meta.name + " for faster loading: " +
-                                    human_size(it->second.bytes) + ", the same game.";
-  }
 }
 
 }  // namespace kg::gui

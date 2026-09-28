@@ -57,6 +57,15 @@ Pack Player::open_pack(const std::string& id) const {
   return Pack::open(b_.self, b_.toc.at(e), e.len);
 }
 
+std::vector<std::string> Player::set_games(const std::string& id) const {
+  const std::string& set = game(id).set;
+  std::vector<std::string> out;
+  for (const bundle::GameMeta& g : b_.meta.games) {
+    if (g.set == set) out.push_back(g.id);
+  }
+  return out;
+}
+
 bool Player::verified(const std::string& id) const {
   const bundle::Entry& e = entry(id);
   return pack_verified(memo_file(), id, b_.meta.version, e.blake3);
@@ -68,14 +77,21 @@ void Player::verify(const std::string& id, const std::function<void(uint64_t, ui
   bundle::Callbacks cb;
   if (progress) cb.progress = [&](const bundle::Progress& p) { progress(p.done, p.total); };
   Hash got = bundle::hash_range(b_.self, b_.toc.at(e), e.len, cb);
+  // One pack for every game of the set: one hash answers for all of them.
+  const std::vector<std::string> together = set_games(id);
   if (got != e.blake3) {
     std::string msg = "Game " + game(id).name + " is damaged inside this file.";
-    msg += b_.meta.games.size() > 1 ? " The other games in it still play; download it again to get "
-                                      "this one back."
-                                    : " Download it again.";
+    std::string others;
+    for (const std::string& o : together) {
+      if (o != id) others += (others.empty() ? "" : ", ") + game(o).name;
+    }
+    if (!others.empty()) msg += " It shares its pack with " + others + ", which cannot play either.";
+    msg += b_.meta.games.size() > together.size() ? " The other games in it still play; download it again to get "
+                                                    "this one back."
+                                                  : " Download it again.";
     throw Damaged(id, msg);
   }
-  remember_verified(memo_file(), id, b_.meta.version, e.blake3);
+  for (const std::string& o : together) remember_verified(memo_file(), o, b_.meta.version, e.blake3);
 }
 
 UnpackPlan Player::unpack_plan(const std::string& id) const {
@@ -90,32 +106,40 @@ UnpackPlan Player::unpack_plan(const std::string& id) const {
   // game goes back to where it would have been without it, rather than to a
   // directory that may no longer have anywhere to be made.
   if (!where.empty() && !fs::is_directory(where, ec)) where.clear();
-  u.where = where.empty() ? game_extract_dir(id) : fs::path(where);
-  const std::string stamp = session::extraction_stamp(pk.meta(), pk.header());
-  const fs::path game_tree = pk.meta().rooted() ? u.where / "game" : u.where;
+  u.where = where.empty() ? set_extract_dir(pk.set().set_id) : fs::path(where);
+  const std::string stamp = session::extraction_stamp(pk.game(id), pk.header());
+  const fs::path game_tree = u.where / body_game_dir(id) / "game";
   u.ready = session::extraction_stamp_matches(session::extraction_stamp_file(u.where), stamp) &&
             fs::exists(game_tree, ec);
   // The body is copied out beside the tree first and removed after, so the
   // peak is both.
-  u.need = unpacked_estimate(pk.meta()) + pk.header().body_len;
+  u.need = unpacked_estimate(pk.set()) + pk.header().body_len;
   u.free = free_bytes(u.where);
   return u;
 }
 
 fs::path Player::unpack(const std::string& id, const fs::path& dir) const {
-  // The game's lock, the one a session holds while it plays. An unpack
+  // The games' locks, the ones a session holds while it plays. An unpack
   // removes the tree it goes into, and on a machine without FUSE that tree
   // is what a running session plays from and writes into - a newer version
   // of this player shares the older one's state, and so its cache. Two
   // Extracts at once would each remove the other's half-made tree.
-  session::GameLock lock = session::lock_game(id);
-  if (lock.busy()) {
-    throw std::runtime_error(game(id).name + " is being played, or unpacked, by another copy of this "
-                             "player. Close that one first.");
+  //
+  // Every game of the set, because the set is unpacked once and every one of
+  // them plays from that copy.
+  const std::vector<std::string> together = set_games(id);
+  std::vector<session::GameLock> locks;
+  for (const std::string& o : together) {
+    locks.push_back(session::lock_game(o));
+    if (locks.back().busy()) {
+      throw std::runtime_error(game(o).name +
+                               " is being played, or unpacked, by another copy of this "
+                               "player. Close that one first.");
+    }
   }
   Pack pk = open_pack(id);
   fs::path where = dir.empty() ? unpack_plan(id).where : dir;
-  const uint64_t need = unpacked_estimate(pk.meta()) + pk.header().body_len;
+  const uint64_t need = unpacked_estimate(pk.set()) + pk.header().body_len;
   const uint64_t have = free_bytes(where);
   if (have < need) {
     throw std::runtime_error("Unpacking " + game(id).name + " needs " + fmt::bytes_si(need) + " in " +
@@ -123,8 +147,10 @@ fs::path Player::unpack(const std::string& id, const fs::path& dir) const {
   }
   session::unpack_body(pk, where);
   std::error_code ec;
-  fs::create_directories(unpack_pointer(id).parent_path(), ec);
-  std::ofstream(unpack_pointer(id), std::ios::trunc) << where.string() << "\n";
+  for (const std::string& o : together) {
+    fs::create_directories(unpack_pointer(o).parent_path(), ec);
+    std::ofstream(unpack_pointer(o), std::ios::trunc) << where.string() << "\n";
+  }
   return where;
 }
 
@@ -246,7 +272,7 @@ session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) co
   std::string extra_overrides;
   if (!g.extra_dlls.empty()) {
     const fs::path layer = state_dir() / id / "extra";
-    extra_overrides = stage_extra_layer(g.extra_dlls, exe_dir_in_tree(open_pack(id).meta()), layer);
+    extra_overrides = stage_extra_layer(g.extra_dlls, exe_dir_in_tree(open_pack(id).game(id)), layer);
     src.extra_layer = layer;
     pre.emplace_back("the author's files", std::to_string(g.extra_dlls.size()) + ", beside the game's executable");
   } else {
@@ -284,7 +310,7 @@ session::Outcome Player::play(const std::string& id, const PlayOverrides& ov) co
   // After the discs, which take d: onwards in the order the pack names them.
   size_t discs = 0;
   try {
-    discs = open_pack(id).meta().discs.size();
+    discs = open_pack(id).game(id).discs.size();
   } catch (const std::exception&) {
   }
   req.game_drive = static_cast<char>(std::max<size_t>('g', 'd' + discs));

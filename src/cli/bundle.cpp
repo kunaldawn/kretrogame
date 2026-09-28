@@ -82,11 +82,11 @@ int bundle_build(const std::vector<std::string>& a) {
   for (const std::string& id : games) {
     fs::path pk = game_pack(id);
     std::error_code ec;
-    if (!fs::exists(pk, ec)) throw std::runtime_error(id + " is not installed");
+    if (pk.empty() || !fs::exists(pk, ec)) throw std::runtime_error(id + " is not installed");
     const fs::path frames = session::journal_dir(id);
     fs::path title = session::title_art_file(frames);
     bool cover = fs::exists(title, ec) && !fs::exists(session::title_marker_file(frames), ec);
-    d.games.push_back(bundle::game_from_pack(bundle::read_pack_facts(pk), cover ? title : fs::path()));
+    d.games.push_back(bundle::game_from_pack(bundle::read_pack_facts(pk, id), cover ? title : fs::path()));
   }
   if (d.title.empty()) d.title = d.games.size() == 1 ? d.games[0].name : (d.id.empty() ? "kretro bundle" : d.id);
   if (d.id.empty()) d.id = d.games.size() == 1 ? d.games[0].id : bundle::id_from_title(d.title);

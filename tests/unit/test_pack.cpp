@@ -144,32 +144,32 @@ static void test_pack_roundtrip(const fs::path& tmp) {
   m.tree = Tree::from_directory(root);
 
   // A recipe pack: no body, but a full tree and a real Merkle root.
-  write_pack(out, m, WriteOptions{PackKind::Game, std::nullopt, false});
+  write_pack(out, set_of(m), WriteOptions{PackKind::Game, std::nullopt, false});
   Pack p = Pack::open(out);
   CHECK(!p.has_body());
   CHECK_EQ(p.header().kind, PackKind::Game);
-  CHECK_EQ(p.header().blake3_root, m.tree.root());
-  CHECK_EQ(p.meta().id, std::string("classic2"));
-  CHECK_EQ(p.meta().name, std::string("Classic 2"));
-  CHECK_EQ(p.meta().year, 1998u);
-  CHECK_EQ(p.meta().developer, std::string("Example Studios"));
-  CHECK_EQ(p.meta().run.exe, std::string("CLASSIC2.EXE"));
-  CHECK_EQ(p.meta().run.width, 640u);
-  CHECK_EQ(p.meta().runtime.blake3, hash_string("a runtime"));
-  CHECK_EQ(p.meta().runtime.winetricks.size(), 2u);
-  CHECK_EQ(p.meta().recipe.member, std::string("Data2.zip"));
-  CHECK_EQ(p.meta().recipe.fingerprints.size(), 1u);
-  CHECK_EQ(p.meta().recipe.fingerprints[0].volume_id, std::string("CLASSIC_COLLECTION"));
-  CHECK_EQ(p.meta().recipe.fingerprints[0].anchors.size(), 1u);
-  CHECK_EQ(p.meta().recipe.fingerprints[0].anchors[0].hash, hash_string("an anchor"));
-  CHECK_EQ(p.meta().tree.canonical(), m.tree.canonical());
+  CHECK_EQ(p.header().blake3_root, set_of(m).root());
+  CHECK_EQ(p.games()[0].id, std::string("classic2"));
+  CHECK_EQ(p.games()[0].name, std::string("Classic 2"));
+  CHECK_EQ(p.games()[0].year, 1998u);
+  CHECK_EQ(p.games()[0].developer, std::string("Example Studios"));
+  CHECK_EQ(p.games()[0].run.exe, std::string("CLASSIC2.EXE"));
+  CHECK_EQ(p.games()[0].run.width, 640u);
+  CHECK_EQ(p.games()[0].runtime.blake3, hash_string("a runtime"));
+  CHECK_EQ(p.games()[0].runtime.winetricks.size(), 2u);
+  CHECK_EQ(p.games()[0].recipe.member, std::string("Data2.zip"));
+  CHECK_EQ(p.games()[0].recipe.fingerprints.size(), 1u);
+  CHECK_EQ(p.games()[0].recipe.fingerprints[0].volume_id, std::string("CLASSIC_COLLECTION"));
+  CHECK_EQ(p.games()[0].recipe.fingerprints[0].anchors.size(), 1u);
+  CHECK_EQ(p.games()[0].recipe.fingerprints[0].anchors[0].hash, hash_string("an anchor"));
+  CHECK_EQ(p.games()[0].tree.canonical(), m.tree.canonical());
   CHECK(p.verify().ok);
 
   // A capsule pack: same metadata, same root, plus a body.
   fs::path body = tmp / "body.bin";
   write_file(body, std::string(100000, 'x'));
   fs::path cap = tmp / "classic2.capsule.kgpack";
-  write_pack(cap, m, WriteOptions{PackKind::Game, body, false});
+  write_pack(cap, set_of(m), WriteOptions{PackKind::Game, body, false});
   Pack c = Pack::open(cap);
   CHECK(c.has_body());
   CHECK_EQ(c.header().body_len, 100000u);
@@ -186,20 +186,16 @@ static void test_pack_roundtrip(const fs::path& tmp) {
   CHECK_EQ(hash_file(extracted), hash_file(body));
 }
 
-// The body layout changed, so the revision changed with it. Revision 1 packs
-// were written by every build before this one and there is nothing wrong with
-// them - they are flat, and they say so - so the check is a range and not an
-// equality. Revision 3 does not exist yet and must still be refused: a reader
-// that shrugs at a revision it does not know is a reader that will one day
-// mount the wrong bytes.
+// Revision 3 is the only one this build reads: a pack is a media set now, and
+// a revision 1 or 2 pack is one game with its own copy of its discs. Those are
+// installed again rather than read on a guess.
 static void test_container_revision(const fs::path& tmp) {
   section("container revision");
   fs::path out = tmp / "rev.kgpack";
   Meta m;
   m.id = "rev";
-  write_pack(out, m, WriteOptions{PackKind::Game, std::nullopt, false});
-
-  CHECK_EQ(static_cast<int>(Pack::open(out).header().revision), 2);
+  write_pack(out, set_of(m), WriteOptions{PackKind::Game, std::nullopt, false});
+  CHECK_EQ(static_cast<int>(Pack::open(out).header().revision), 3);
 
   // Byte 7 is the revision, straight after the seven-byte magic.
   auto stamp = [&](const fs::path& p, unsigned char rev) {
@@ -208,18 +204,174 @@ static void test_container_revision(const fs::path& tmp) {
     f.seekp(7);
     f.write(reinterpret_cast<const char*>(&rev), 1);
   };
-
-  fs::path one = tmp / "rev1.kgpack";
-  stamp(one, 1);
-  CHECK_EQ(static_cast<int>(Pack::open(one).header().revision), 1);
-
-  fs::path three = tmp / "rev3.kgpack";
-  stamp(three, 3);
-  CHECK_THROWS(Pack::open(three));
-
+  for (unsigned char old : {1, 2}) {
+    fs::path p = tmp / ("rev" + std::to_string(old) + ".kgpack");
+    stamp(p, old);
+    CHECK_THROWS_WITH(Pack::open(p), "made by an older kretro; install the game again");
+  }
+  fs::path four = tmp / "rev4.kgpack";
+  stamp(four, 4);
+  CHECK_THROWS(Pack::open(four));
   fs::path zero = tmp / "rev0.kgpack";
   stamp(zero, 0);
   CHECK_THROWS(Pack::open(zero));
+}
+
+static Meta set_game(const std::string& id, std::vector<Meta::Disc> discs) {
+  Meta m;
+  m.id = id;
+  m.name = "The game " + id;
+  m.run.exe = "game.exe";
+  m.discs = std::move(discs);
+  m.tree = Tree::from_canonical("000081a4 0000000000000004 " + to_hex(hash_string(id)) + " game.exe\n");
+  return m;
+}
+
+static Meta::Disc set_disc(const std::string& key, const std::string& label) {
+  Meta::Disc d;
+  d.key = key;
+  d.label = label;
+  d.serial = 7;
+  d.ref = "Example.zip#" + label;
+  d.bytes = 1000;
+  return d;
+}
+
+// Two games from one disc, one of them from a second disc too: the disc is
+// listed once, each game names its own in drive order, and each game's view
+// carries the discs and the body it plays from.
+static void test_set_meta() {
+  section("set metadata: one disc, two games");
+  SetMeta s;
+  s.set_id = "s-0123456789abcdef";
+  s.discs = {set_disc("aaaaaaaaaaaaaaaa", "DEMO_DISC_1"), set_disc("bbbbbbbbbbbbbbbb", "DEMO_DISC_2")};
+  s.games = {set_game("example-game-b", {s.discs[1], s.discs[0]}), set_game("example-game-a", {s.discs[0]})};
+  s.body.length = 4096;
+  s.body.blake3 = hash_string("body");
+  s.body.packing = kBodyPacking;
+
+  SetMeta back = SetMeta::decode(s.encode());
+  CHECK_EQ(back.set_id, s.set_id);
+  CHECK_EQ(back.discs.size(), size_t{2});
+  CHECK_EQ(back.games.size(), size_t{2});
+  // Sorted by id on the way out, so the bytes do not depend on install order.
+  CHECK_EQ(back.games[0].id, std::string("example-game-a"));
+  CHECK_EQ(back.games[1].id, std::string("example-game-b"));
+  const Meta* b = back.find("example-game-b");
+  CHECK(b != nullptr);
+  CHECK_EQ(b->discs.size(), size_t{2});
+  CHECK_EQ(b->discs[0].label, std::string("DEMO_DISC_2"));  // drive D:
+  CHECK_EQ(b->discs[1].label, std::string("DEMO_DISC_1"));  // drive E:
+  CHECK_EQ(b->discs[0].bytes, uint64_t{1000});
+  CHECK_EQ(b->body.blake3, hash_string("body"));
+  CHECK_EQ(b->body.packing, std::string(kBodyPacking));
+  CHECK(back.find("example-game-c") == nullptr);
+
+  // The root is over the games' roots in id order, and so does not depend on
+  // the order they were given in.
+  SetMeta swapped = s;
+  std::swap(swapped.games[0], swapped.games[1]);
+  CHECK_EQ(s.root(), swapped.root());
+  CHECK(s.root() != s.games[0].tree.root());
+}
+
+static void test_set_meta_refusals() {
+  section("set metadata: what is refused");
+  auto refused = [](const SetMeta& s, const char* why) {
+    bool threw = false;
+    try {
+      SetMeta::decode(s.encode());
+    } catch (const std::exception& ex) {
+      threw = std::string(ex.what()).find(why) != std::string::npos;
+      if (!threw) std::fprintf(stderr, "  said: %s\n", ex.what());
+    }
+    CHECK(threw);
+  };
+  SetMeta ok;
+  ok.set_id = "s-0123456789abcdef";
+  ok.discs = {set_disc("aaaaaaaaaaaaaaaa", "DEMO_DISC")};
+  ok.games = {set_game("example-game", {ok.discs[0]})};
+  CHECK_EQ(SetMeta::decode(ok.encode()).games.size(), size_t{1});
+
+  SetMeta no_games = ok;
+  no_games.games.clear();
+  refused(no_games, "no games");
+
+  SetMeta twice = ok;
+  twice.games.push_back(twice.games[0]);
+  refused(twice, "twice");
+
+  SetMeta unknown = ok;
+  unknown.games[0].discs[0].key = "cccccccccccccccc";
+  refused(unknown, "cccccccccccccccc");
+
+  SetMeta dup_disc = ok;
+  dup_disc.discs.push_back(dup_disc.discs[0]);
+  refused(dup_disc, "aaaaaaaaaaaaaaaa");
+
+  SetMeta bad_key = ok;
+  bad_key.discs[0].key = "../x";
+  bad_key.games[0].discs[0].key = "../x";
+  refused(bad_key, "not a name");
+
+  SetMeta bad_id = ok;
+  bad_id.set_id = "../x";
+  refused(bad_id, "not a name");
+
+  SetMeta bad_game = ok;
+  bad_game.games[0].id = "../../x";
+  refused(bad_game, "not a name a game can have");
+}
+
+static void test_disc_key_and_set_id() {
+  section("disc keys and set ids");
+  Hash p = hash_string("the first 64 MiB");
+  std::string k = disc_key(734003200, p);
+  CHECK_EQ(k.size(), size_t{16});
+  CHECK_EQ(k, disc_key(734003200, p));
+  CHECK(k != disc_key(734003201, p));
+  CHECK(k != disc_key(734003200, hash_string("another disc")));
+  CHECK(id_is_safe(k));
+
+  std::string a = set_id_for({"bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa"}, "example-game");
+  CHECK_EQ(a.rfind("s-", 0), size_t{0});
+  CHECK_EQ(a.size(), size_t{18});
+  // The discs decide, in any order, and the game does not.
+  CHECK_EQ(a, set_id_for({"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"}, "another-game"));
+  // With no disc at all, the game decides.
+  CHECK(set_id_for({}, "example-game") != set_id_for({}, "another-game"));
+  CHECK(id_is_safe(set_id_for({}, "example-game")));
+
+  CHECK_EQ(body_game_dir("example-game").generic_string(), std::string("games/example-game"));
+  CHECK_EQ(body_disc_dir("aaaaaaaaaaaaaaaa").generic_string(), std::string("discs/aaaaaaaaaaaaaaaa"));
+
+  Meta m = set_game("example-game", {set_disc("aaaaaaaaaaaaaaaa", "DEMO_DISC")});
+  SetMeta s = set_of(m);
+  CHECK_EQ(s.set_id, set_id_for({"aaaaaaaaaaaaaaaa"}, "example-game"));
+  CHECK_EQ(s.discs.size(), size_t{1});
+  CHECK_EQ(s.games.size(), size_t{1});
+}
+
+// A pack is several games now: game() finds one by id and names the file when
+// it is not there.
+static void test_pack_games(const fs::path& tmp) {
+  section("a pack of two games");
+  SetMeta s;
+  s.set_id = "s-0123456789abcdef";
+  s.discs = {set_disc("aaaaaaaaaaaaaaaa", "DEMO_DISC")};
+  s.games = {set_game("example-game-a", {s.discs[0]}), set_game("example-game-b", {s.discs[0]})};
+  fs::path body = tmp / "set.body";
+  write_file(body, std::string(9000, 's'));
+  fs::path out = tmp / "set.kgpack";
+  write_pack(out, s, WriteOptions{PackKind::Game, body, false});
+  Pack p = Pack::open(out);
+  CHECK_EQ(p.set().set_id, s.set_id);
+  CHECK_EQ(p.games().size(), size_t{2});
+  CHECK_EQ(p.game("example-game-b").name, std::string("The game example-game-b"));
+  CHECK_EQ(p.game("example-game-b").body.length, uint64_t{9000});
+  CHECK_THROWS_WITH(p.game("example-game-c"), "example-game-c");
+  CHECK_EQ(p.header().blake3_root, s.root());
+  CHECK(p.verify().ok);
 }
 
 // The two spellings of a kind: the word kgpack create takes after --kind, and
@@ -249,31 +401,6 @@ static void test_pack_kind_names() {
   CHECK(!parse_pack_kind("").has_value());
 }
 
-// The layout is a field and not an inference from the revision, because the two
-// answer different questions: the revision says what this build is allowed to
-// read at all, and the layout says where in the body the game is. A pack
-// written before either existed decodes as flat, which is exactly what it is.
-static void test_layout() {
-  section("body layout");
-  Meta m;
-  m.id = "adventure2";
-  CHECK_EQ(m.layout, std::string("flat"));
-  CHECK(!m.rooted());
-
-  m.layout = "rooted";
-  CHECK(m.rooted());
-  Meta back = Meta::decode(m.encode());
-  CHECK_EQ(back.layout, std::string("rooted"));
-  CHECK(back.rooted());
-
-  // A pack from before the key existed. Absent means flat, and flat is what
-  // those packs are: the body root is the game tree.
-  Meta old;
-  old.id = "old";
-  CHECK_EQ(Meta::decode(old.encode()).layout, std::string("flat"));
-  CHECK(!Meta::decode(old.encode()).rooted());
-}
-
 // Peak resident memory, in bytes, from the kernel's own high-water mark. The
 // point of this test is not that a big pack round-trips - it is that writing it
 // never held it. VmHWM is the only measurement that can tell those apart.
@@ -292,8 +419,8 @@ static uint64_t peak_rss() {
   return 0;
 }
 
-// A flat body is a game tree and read_all could hold one. A rooted body is a
-// game tree plus its discs plus their audio, and four gigabytes is ordinary;
+// A body is a set: its games' trees plus their discs plus the discs' audio,
+// and four gigabytes is ordinary;
 // read_all appends 64 KiB at a time with no reserve, so its peak occupancy is
 // worse than a single copy of it.
 static void test_streamed_body(const fs::path& tmp) {
@@ -329,7 +456,6 @@ static void test_streamed_body(const fs::path& tmp) {
 
   Meta m;
   m.id = "big";
-  m.layout = "rooted";
   fs::path out = tmp / "big.kgpack";
 
   // VmHWM is a high-water mark and never falls, so by the time this test runs
@@ -342,14 +468,14 @@ static void test_streamed_body(const fs::path& tmp) {
     if (cr) cr << "5";
   }
   uint64_t before = peak_rss();
-  write_pack(out, m, WriteOptions{PackKind::Game, body, false});
+  write_pack(out, set_of(m), WriteOptions{PackKind::Game, body, false});
   Pack p = Pack::open(out);
   CHECK(p.verify().ok);
   uint64_t after = peak_rss();
 
   CHECK_EQ(p.header().body_len, kBodyBytes);
-  CHECK_EQ(p.meta().body.length, kBodyBytes);
-  CHECK_EQ(p.meta().body.blake3, hash_file(body));
+  CHECK_EQ(p.games()[0].body.length, kBodyBytes);
+  CHECK_EQ(p.games()[0].body.blake3, hash_file(body));
   CHECK_EQ(p.header().body_off % kBodyAlign, 0u);
 
   // Sixteen megabytes of growth, against a body of sixty-four. A streaming
@@ -382,13 +508,20 @@ static void test_meta_install_blocks(const fs::path& tmp) {
   m2.name = "Adventure II";
   m2.install.install_dir = "C:/Program Files/Adventure II";
   m2.registry.fragment = "REGEDIT4\n\n[HKEY_CURRENT_USER\\Software\\X]\n\"A\"=\"1\"\n";
-  m2.discs.push_back(Meta::Disc{"INSTALL", 0x1234u, "AdventureUSA.zip#INSTALL",
-                               "/home/someone/discs/AdventureUSA.zip", true});
-  // A disc that was left out on purpose. Play must not go looking for a
-  // discs/2 that nobody wrote, and the game's page must be able to say "needs
-  // the original disc" rather than pretending.
-  m2.discs.push_back(Meta::Disc{"DEMO_PLAY", 0x5678u, "AdventureUSA.zip#DEMO_PLAY",
-                               "/home/someone/discs/AdventureUSA.zip", false});
+  Meta::Disc install;
+  install.key = "1111111111111111";
+  install.label = "INSTALL";
+  install.serial = 0x1234u;
+  install.ref = "AdventureUSA.zip#INSTALL";
+  install.source = "/home/someone/discs/AdventureUSA.zip";
+  install.bytes = 650000000;
+  Meta::Disc play = install;
+  play.key = "2222222222222222";
+  play.label = "DEMO_PLAY";
+  play.serial = 0x5678u;
+  play.ref = "AdventureUSA.zip#DEMO_PLAY";
+  play.bytes = 0;
+  m2.discs = {install, play};
   m2.recipe.setup_ref = "Setup.exe";
   // What the installer wrote outside the game folder. It sits between the
   // registry block and discs2, which is exactly where a miscounted map arity
@@ -407,7 +540,9 @@ static void test_meta_install_blocks(const fs::path& tmp) {
   m2.body.length = 4096;
   m2.tree = Tree::from_directory(t);
 
-  Meta back = Meta::decode(m2.encode());
+  // Through a set, which is the only way a game is written now; the game's
+  // view comes back with its discs and the set's body.
+  Meta back = SetMeta::decode(set_of(m2).encode()).games[0];
   CHECK_EQ(back.install.install_dir, std::string("C:/Program Files/Adventure II"));
   CHECK_EQ(back.registry.fragment, m2.registry.fragment);
   CHECK_EQ(back.system.files, 37u);
@@ -420,8 +555,8 @@ static void test_meta_install_blocks(const fs::path& tmp) {
   // what makes a disc from anywhere else findable again.
   CHECK_EQ(back.discs[0].source, std::string("/home/someone/discs/AdventureUSA.zip"));
   CHECK_EQ(back.discs[1].source, std::string("/home/someone/discs/AdventureUSA.zip"));
-  CHECK(back.discs[0].embedded);
-  CHECK(!back.discs[1].embedded);
+  CHECK_EQ(back.discs[0].key, std::string("1111111111111111"));
+  CHECK_EQ(back.discs[0].bytes, uint64_t{650000000});
   CHECK_EQ(back.recipe.setup_ref, std::string("Setup.exe"));
   CHECK_EQ(back.input.size(), 2u);
   CHECK_EQ(back.input.at("a"), std::string("Return"));
@@ -432,21 +567,21 @@ static void test_meta_install_blocks(const fs::path& tmp) {
   // A pack with none of these still decodes, with the defaults.
   Meta plain;
   plain.id = "old";
-  Meta pback = Meta::decode(plain.encode());
+  Meta pback = SetMeta::decode(set_of(plain).encode()).games[0];
   CHECK_EQ(pback.install.install_dir, std::string(""));
   CHECK_EQ(pback.system.files, 0u);
   CHECK_EQ(pback.discs.size(), 0u);
   CHECK_EQ(pback.input.size(), 0u);
 
-  // A revision 1 pack records discs and embeds none of them, because there was
-  // nowhere in the body to put them.
-  Meta rev1;
-  rev1.id = "demo-game";
-  rev1.discs.push_back(Meta::Disc{"DEMO_GAME", 0x99u, "demo.zip#DEMO_GAME"});
-  CHECK(!Meta::decode(rev1.encode()).discs[0].embedded);
-  // Nor did it record where the disc came from, so the field reads back empty
-  // rather than pointing at a path on somebody else's machine.
-  CHECK_EQ(Meta::decode(rev1.encode()).discs[0].source, std::string(""));
+  // A disc whose source was never recorded reads back empty rather than
+  // pointing at a path on somebody else's machine.
+  Meta nosource;
+  nosource.id = "demo-game";
+  Meta::Disc d;
+  d.key = "3333333333333333";
+  d.label = "DEMO_GAME";
+  nosource.discs = {d};
+  CHECK_EQ(SetMeta::decode(set_of(nosource).encode()).games[0].discs[0].source, std::string(""));
 }
 
 // A pack is written over the top of the capsule the machine is already playing.
@@ -462,7 +597,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   Meta m;
   m.id = "keeper";
   m.name = "The Installed Game";
-  write_pack(dest, m, WriteOptions{PackKind::Game, body, false});
+  write_pack(dest, set_of(m), WriteOptions{PackKind::Game, body, false});
   const uint64_t was_size = fs::file_size(dest);
   const Hash was_hash = hash_file(dest);
   CHECK(Pack::open(dest).verify().ok);
@@ -472,7 +607,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   // business.
   Meta m2;
   m2.id = "keeper";
-  CHECK_THROWS(write_pack(dest, m2, WriteOptions{PackKind::Game, tmp / "no-such.dwarfs", false}));
+  CHECK_THROWS(write_pack(dest, set_of(m2), WriteOptions{PackKind::Game, tmp / "no-such.dwarfs", false}));
   CHECK_EQ(fs::file_size(dest), was_size);
   CHECK_EQ(to_hex(hash_file(dest)), to_hex(was_hash));
 
@@ -485,7 +620,7 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   fs::path shifty("/proc/self/cmdline");
   std::error_code sec;
   if (fs::exists(shifty, sec) && fs::file_size(shifty, sec) == 0 && !sec) {
-    CHECK_THROWS(write_pack(dest, m2, WriteOptions{PackKind::Game, shifty, false}));
+    CHECK_THROWS(write_pack(dest, set_of(m2), WriteOptions{PackKind::Game, shifty, false}));
     CHECK_EQ(fs::file_size(dest), was_size);
     CHECK_EQ(to_hex(hash_file(dest)), to_hex(was_hash));
     CHECK(Pack::open(dest).verify().ok);
@@ -503,8 +638,8 @@ static void test_write_pack_keeps_what_was_there(const fs::path& tmp) {
   Meta m3;
   m3.id = "keeper";
   m3.name = "The Reinstalled Game";
-  write_pack(dest, m3, WriteOptions{PackKind::Game, body, false});
-  CHECK_EQ(Pack::open(dest).meta().name, std::string("The Reinstalled Game"));
+  write_pack(dest, set_of(m3), WriteOptions{PackKind::Game, body, false});
+  CHECK_EQ(Pack::open(dest).games()[0].name, std::string("The Reinstalled Game"));
 
   fs::remove(dest, sec);
   fs::remove(body, sec);
@@ -619,14 +754,14 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
 
   // And the pack carrying one is refused whole, on open, before a directory is
   // named after it. "../../../.config/autostart/x" would have put a stranger's
-  // file wherever he liked, on import and again on install, play and uninstall.
+  // file wherever he liked, on import and again on install and play.
   Meta hostile;
   hostile.id = "../../../.config/autostart/kretro";
   hostile.name = "Classic 2";
   fs::path bad_id = tmp / "hostile-id.kgpack";
-  write_pack(bad_id, hostile, WriteOptions{PackKind::Game, std::nullopt, false});
+  write_pack(bad_id, set_of(hostile), WriteOptions{PackKind::Game, std::nullopt, false});
   CHECK_THROWS(Pack::open(bad_id));
-  CHECK_THROWS(Meta::decode(hostile.encode()));
+  CHECK_THROWS(SetMeta::decode(set_of(hostile).encode()));
 
   // install_dir is joined onto the prefix's drive_c, and what is there is
   // removed and replaced with a symlink the first time the game is played. A
@@ -645,7 +780,7 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
   escaping.id = "adventure2";
   escaping.install.install_dir = "../../../../../../.bashrc";
   fs::path bad_dir = tmp / "hostile-install-dir.kgpack";
-  write_pack(bad_dir, escaping, WriteOptions{PackKind::Game, std::nullopt, false});
+  write_pack(bad_dir, set_of(escaping), WriteOptions{PackKind::Game, std::nullopt, false});
   CHECK_THROWS(Pack::open(bad_dir));
 
   // The ordinary pack this one is a forgery of still opens, with both strings
@@ -654,10 +789,10 @@ static void test_a_pack_names_nothing_outside_its_own_places(const fs::path& tmp
   ok.id = "adventure2";
   ok.install.install_dir = "Program Files/Adventure II";
   fs::path fine = tmp / "ordinary.kgpack";
-  write_pack(fine, ok, WriteOptions{PackKind::Game, std::nullopt, false});
+  write_pack(fine, set_of(ok), WriteOptions{PackKind::Game, std::nullopt, false});
   Pack p = Pack::open(fine);
-  CHECK_EQ(p.meta().id, std::string("adventure2"));
-  CHECK_EQ(p.meta().install.install_dir, std::string("Program Files/Adventure II"));
+  CHECK_EQ(p.games()[0].id, std::string("adventure2"));
+  CHECK_EQ(p.games()[0].install.install_dir, std::string("Program Files/Adventure II"));
 
   std::error_code ec;
   fs::remove(bad_id, ec);
@@ -727,7 +862,7 @@ static void test_an_overflowing_body_length_is_refused(const fs::path& tmp) {
   fs::path good = tmp / "overflow.kgpack";
   Meta m;
   m.id = "dash3";
-  write_pack(good, m, WriteOptions{PackKind::Game, body, false});
+  write_pack(good, set_of(m), WriteOptions{PackKind::Game, body, false});
   CHECK(Pack::open(good).verify().ok);
 
   // Byte 32 is body_off and byte 40 is body_len, both little-endian.
@@ -790,7 +925,7 @@ static void test_golden_header() {
   h.body_len = 20000;
   h.blake3_root = golden_hash(0x20);
   const std::string want =
-      "4b475041434b00020100010001000000600000000000000034120000000000000010000000000000204e000000000000"
+      "4b475041434b00030100010001000000600000000000000034120000000000000010000000000000204e000000000000"
       "00000000000000000000000000000000202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
   CHECK_EQ(kgtest::to_hex(h.serialize()), want);
 }
@@ -804,7 +939,6 @@ static Meta golden_meta() {
   m.developer = "Example Developer";
   m.publisher = "Example Publisher";
   m.year = 1999;
-  m.layout = "rooted";
   m.recipe.method = "installer_exe";
   m.recipe.member = "setup/data.cab";
   m.recipe.subdir = "GAME";
@@ -837,87 +971,114 @@ static Meta golden_meta() {
   m.system.files = 3;
   m.system.bytes = 5000000000ull;
   m.input = {{"start", "Escape"}, {"a", "Return"}};
-  m.discs.push_back(Meta::Disc{"DEMO_DISC", 0x12345678, "example.zip#DEMO_DISC", "/discs/example.iso", true});
-  m.discs.push_back(Meta::Disc{"DEMO_DISC2", 7, "example.zip#DEMO_DISC2", "", false});
-  m.body.length = 20000;
-  m.body.blake3 = golden_hash(0x04);
+  Meta::Disc d1;
+  d1.key = "0001020304050607";
+  d1.label = "DEMO_DISC";
+  d1.serial = 0x12345678;
+  d1.ref = "example.zip#DEMO_DISC";
+  d1.source = "/discs/example.iso";
+  d1.bytes = 734003200;
+  Meta::Disc d2 = d1;
+  d2.key = "0809101112131415";
+  d2.label = "DEMO_DISC2";
+  d2.serial = 7;
+  d2.ref = "example.zip#DEMO_DISC2";
+  d2.source = "";
+  d2.bytes = 1;
+  m.discs = {d1, d2};
   m.tree = Tree::from_canonical("000081a4 0000000000000010 " + to_hex(golden_hash(0x50)) + " GAME.EXE\n" +
                                 "000041ed 0000000000000000 " + to_hex(golden_hash(0x60)) + " data\n" +
                                 "000081a4 0000000000000400 " + to_hex(golden_hash(0x40)) + " data/level1.dat\n");
   return m;
 }
 
-static void test_golden_meta() {
-  section("golden: pack metadata, with and without body.packing");
+// A set of one game, every field set: the set's own keys around the game's.
+static SetMeta golden_set() {
   Meta m = golden_meta();
-  const std::string plain =
-      "b06269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf666c61796f"
-      "757466726f6f7465646377686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c69"
-      "73686572714578616d706c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f"
-      "657865666d656d6265726e73657475702f646174612e636162667375626469726447414d456573657475706953455455"
-      "502e4558456973657475705f726566756578616d706c652e7a69702344454d4f5f444953436564697363738275657861"
-      "6d706c652e7a69702344454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679"
-      "816847414d452e4558456c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473"
-      "697a651a2bc0000066626c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-      "2069766f6c756d655f69646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a30"
-      "3567616e63686f727381a364706174686953455455502e4558456473697a6519303966626c616b653358200203040506"
-      "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e455845646172"
-      "6773672d77696e646f776f77696e646f77735f76657273696f6e6577696e393865776964746819028066686569676874"
-      "1901e06772756e74696d65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112"
-      "131415161718191a1b1c1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e6574726963"
-      "6b738265643364783966766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d7061"
-      "7573655f6f6e5f626c7572f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c6573"
-      "2f4578616d706c652047616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45"
-      "595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c4761"
-      "6d65220a6673797374656da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475"
-      "726e657374617274664573636170656664697363733282a5656c6162656c6944454d4f5f444953436673657269616c1a"
-      "1234567863726566756578616d706c652e7a69702344454d4f5f4449534366736f75726365722f64697363732f657861"
-      "6d706c652e69736f68656d626564646564f5a5656c6162656c6a44454d4f5f44495343326673657269616c0763726566"
-      "766578616d706c652e7a69702344454d4f5f444953433266736f757263656068656d626564646564f464626f6479a266"
-      "6c656e677468194e2066626c616b653358200405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
-      "2223647472656579012f3030303038316134203030303030303030303030303030313020353035313532353335343535"
-      "353635373538353935613562356335643565356636303631363236333634363536363637363836393661366236633664"
-      "366536662047414d452e4558450a30303030343165642030303030303030303030303030303030203630363136323633"
-      "363436353636363736383639366136623663366436653666373037313732373337343735373637373738373937613762"
-      "376337643765376620646174610a30303030383161342030303030303030303030303030343030203430343134323433"
-      "343434353436343734383439346134623463346434653466353035313532353335343535353635373538353935613562"
-      "356335643565356620646174612f6c6576656c312e6461740a";
-  CHECK_EQ(kgtest::to_hex(m.encode()), plain);
+  SetMeta s;
+  s.set_id = "s-0001020304050607";
+  s.discs = m.discs;
+  s.games = {m};
+  s.body.length = 20000;
+  s.body.blake3 = golden_hash(0x04);
+  return s;
+}
 
-  m.body.packing = kBodyPacking;
+static void test_golden_meta() {
+  section("golden: set metadata, with and without body.packing");
+  SetMeta s = golden_set();
+  const std::string plain =
+      "a4667365745f696472732d303030313032303330343035303630376664697363733282a6636b65797030303031303230"
+      "333034303530363037656c6162656c6944454d4f5f444953436673657269616c1a1234567863726566756578616d706c"
+      "652e7a69702344454d4f5f4449534366736f75726365722f64697363732f6578616d706c652e69736f6562797465731a"
+      "2bc00000a6636b65797030383039313031313132313331343135656c6162656c6a44454d4f5f44495343326673657269"
+      "616c0763726566766578616d706c652e7a69702344454d4f5f444953433266736f757263656065627974657301656761"
+      "6d657381ae6269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf63"
+      "77686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c6973686572714578616d70"
+      "6c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f657865666d656d626572"
+      "6e73657475702f646174612e636162667375626469726447414d456573657475706953455455502e4558456973657475"
+      "705f726566756578616d706c652e7a69702344454d4f5f4449534365646973637382756578616d706c652e7a69702344"
+      "454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679816847414d452e455845"
+      "6c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473697a651a2bc000006662"
+      "6c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2069766f6c756d655f69"
+      "646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a303567616e63686f727381"
+      "a364706174686953455455502e4558456473697a6519303966626c616b6533582002030405060708090a0b0c0d0e0f10"
+      "1112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e4558456461726773672d77696e646f77"
+      "6f77696e646f77735f76657273696f6e6577696e3938657769647468190280666865696768741901e06772756e74696d"
+      "65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112131415161718191a1b1c"
+      "1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e65747269636b738265643364783966"
+      "766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d70617573655f6f6e5f626c75"
+      "72f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c65732f4578616d706c652047"
+      "616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45595f4c4f43414c5f4d41"
+      "4348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c47616d65220a667379737465"
+      "6da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475726e6573746172746645"
+      "736361706565646973637382703030303130323033303430353036303770303830393130313131323133313431356474"
+      "72656579012f303030303831613420303030303030303030303030303031302035303531353235333534353535363537"
+      "353835393561356235633564356535663630363136323633363436353636363736383639366136623663366436653666"
+      "2047414d452e4558450a3030303034316564203030303030303030303030303030303020363036313632363336343635"
+      "363636373638363936613662366336643665366637303731373237333734373537363737373837393761376237633764"
+      "3765376620646174610a3030303038316134203030303030303030303030303034303020343034313432343334343435"
+      "343634373438343934613462346334643465346635303531353235333534353535363537353835393561356235633564"
+      "3565356620646174612f6c6576656c312e6461740a64626f6479a2666c656e677468194e2066626c616b653358200405"
+      "060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223";
+  CHECK_EQ(kgtest::to_hex(s.encode()), plain);
+  s.body.packing = kBodyPacking;
   const std::string packed =
-      "b06269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf666c61796f"
-      "757466726f6f7465646377686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c69"
-      "73686572714578616d706c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f"
-      "657865666d656d6265726e73657475702f646174612e636162667375626469726447414d456573657475706953455455"
-      "502e4558456973657475705f726566756578616d706c652e7a69702344454d4f5f444953436564697363738275657861"
-      "6d706c652e7a69702344454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679"
-      "816847414d452e4558456c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473"
-      "697a651a2bc0000066626c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-      "2069766f6c756d655f69646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a30"
-      "3567616e63686f727381a364706174686953455455502e4558456473697a6519303966626c616b653358200203040506"
-      "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e455845646172"
-      "6773672d77696e646f776f77696e646f77735f76657273696f6e6577696e393865776964746819028066686569676874"
-      "1901e06772756e74696d65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112"
-      "131415161718191a1b1c1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e6574726963"
-      "6b738265643364783966766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d7061"
-      "7573655f6f6e5f626c7572f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c6573"
-      "2f4578616d706c652047616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45"
-      "595f4c4f43414c5f4d414348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c4761"
-      "6d65220a6673797374656da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475"
-      "726e657374617274664573636170656664697363733282a5656c6162656c6944454d4f5f444953436673657269616c1a"
-      "1234567863726566756578616d706c652e7a69702344454d4f5f4449534366736f75726365722f64697363732f657861"
-      "6d706c652e69736f68656d626564646564f5a5656c6162656c6a44454d4f5f44495343326673657269616c0763726566"
-      "766578616d706c652e7a69702344454d4f5f444953433266736f757263656068656d626564646564f464626f6479a366"
-      "6c656e677468194e2066626c616b653358200405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
-      "2223677061636b696e676e63617465676f72697a652c533232647472656579012f303030303831613420303030303030"
-      "303030303030303031302035303531353235333534353535363537353835393561356235633564356535663630363136"
-      "3236333634363536363637363836393661366236633664366536662047414d452e4558450a3030303034316564203030"
-      "303030303030303030303030303020363036313632363336343635363636373638363936613662366336643665366637"
-      "3037313732373337343735373637373738373937613762376337643765376620646174610a3030303038316134203030"
-      "303030303030303030303034303020343034313432343334343435343634373438343934613462346334643465346635"
-      "3035313532353335343535353635373538353935613562356335643565356620646174612f6c6576656c312e6461740a";
-  CHECK_EQ(kgtest::to_hex(m.encode()), packed);
+      "a4667365745f696472732d303030313032303330343035303630376664697363733282a6636b65797030303031303230"
+      "333034303530363037656c6162656c6944454d4f5f444953436673657269616c1a1234567863726566756578616d706c"
+      "652e7a69702344454d4f5f4449534366736f75726365722f64697363732f6578616d706c652e69736f6562797465731a"
+      "2bc00000a6636b65797030383039313031313132313331343135656c6162656c6a44454d4f5f44495343326673657269"
+      "616c0763726566766578616d706c652e7a69702344454d4f5f444953433266736f757263656065627974657301656761"
+      "6d657381ae6269646c6578616d706c652d67616d65646e616d656c4578616d706c652047616d6564796561721907cf63"
+      "77686fa269646576656c6f706572714578616d706c6520446576656c6f706572697075626c6973686572714578616d70"
+      "6c65205075626c697368657266726563697065a8666d6574686f646d696e7374616c6c65725f657865666d656d626572"
+      "6e73657475702f646174612e636162667375626469726447414d456573657475706953455455502e4558456973657475"
+      "705f726566756578616d706c652e7a69702344454d4f5f4449534365646973637382756578616d706c652e7a69702344"
+      "454d4f5f44495343766578616d706c652e7a69702344454d4f5f444953433266766572696679816847414d452e455845"
+      "6c66696e6765727072696e747381a66866696c656e616d656b6578616d706c652e69736f6473697a651a2bc000006662"
+      "6c616b653358200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2069766f6c756d655f69"
+      "646944454d4f5f44495343676372656174656473313939392d30312d30322030333a30343a303567616e63686f727381"
+      "a364706174686953455455502e4558456473697a6519303966626c616b6533582002030405060708090a0b0c0d0e0f10"
+      "1112131415161718191a1b1c1d1e1f20216372756ea5636578656847414d452e4558456461726773672d77696e646f77"
+      "6f77696e646f77735f76657273696f6e6577696e3938657769647468190280666865696768741901e06772756e74696d"
+      "65a56269646777696e652d313066626c616b65335820030405060708090a0b0c0d0e0f101112131415161718191a1b1c"
+      "1d1e1f2021226c646c6c6f76657272696465736964647261773d6e2c626a77696e65747269636b738265643364783966"
+      "766372756e36686467766f6f646f6ff56770726573656e74a2636461726531363a31306d70617573655f6f6e5f626c75"
+      "72f467696e7374616c6ca16b696e7374616c6c5f646972781a50726f6772616d2046696c65732f4578616d706c652047"
+      "616d65687265676973747279a168667261676d656e74784252454745444954340a0a5b484b45595f4c4f43414c5f4d41"
+      "4348494e455c536f6674776172655c4578616d706c655d0a2250617468223d22433a5c5c47616d65220a667379737465"
+      "6da26566696c6573036562797465731b000000012a05f20065696e707574a261616652657475726e6573746172746645"
+      "736361706565646973637382703030303130323033303430353036303770303830393130313131323133313431356474"
+      "72656579012f303030303831613420303030303030303030303030303031302035303531353235333534353535363537"
+      "353835393561356235633564356535663630363136323633363436353636363736383639366136623663366436653666"
+      "2047414d452e4558450a3030303034316564203030303030303030303030303030303020363036313632363336343635"
+      "363636373638363936613662366336643665366637303731373237333734373537363737373837393761376237633764"
+      "3765376620646174610a3030303038316134203030303030303030303030303034303020343034313432343334343435"
+      "343634373438343934613462346334643465346635303531353235333534353535363537353835393561356235633564"
+      "3565356620646174612f6c6576656c312e6461740a64626f6479a3666c656e677468194e2066626c616b653358200405"
+      "060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223677061636b696e676e63617465676f72697a"
+      "652c533232";
+  CHECK_EQ(kgtest::to_hex(s.encode()), packed);
 }
 
 // The input map's keys are read with text_or(), so a key that is not text
@@ -926,13 +1087,17 @@ static void test_golden_meta() {
 static void test_golden_meta_input_key() {
   section("golden: an input key that is not text decodes as \"\"");
   cbor::Encoder e;
+  e.map(3);
+  e.text("set_id"); e.text("s-0001020304050607");
+  e.text("discs2"); e.array(0);
+  e.text("games"); e.array(1);
   e.map(2);
   e.text("id"); e.text("example-game");
   e.text("input");
   e.map(2);
   e.uint_val(7); e.text("Return");
   e.text("a"); e.uint_val(5);
-  Meta m = Meta::decode(e.data());
+  Meta m = SetMeta::decode(e.data()).games[0];
   CHECK_EQ(m.input.size(), size_t{2});
   CHECK_EQ(m.input.count(""), size_t{1});
   CHECK_EQ(m.input.at(""), std::string("Return"));
@@ -1035,7 +1200,10 @@ int main() {
     test_pack_roundtrip(tmp);
     test_container_revision(tmp);
     test_pack_kind_names();
-    test_layout();
+    test_set_meta();
+    test_set_meta_refusals();
+    test_disc_key_and_set_id();
+    test_pack_games(tmp);
     test_streamed_body(tmp);
     test_meta_install_blocks(tmp);
     test_pack_rejects_damage(tmp);

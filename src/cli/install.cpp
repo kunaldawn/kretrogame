@@ -56,8 +56,6 @@ int cmd_install(const rt::Env& e, std::vector<std::string>& a) {
       opt.force = true;
     } else if (s == "--keep-tree") {
       opt.keep_tree = true;
-    } else if (s == "--no-discs") {
-      opt.embed_discs = false;
     } else if (!s.empty() && s[0] == '-') {
       std::fprintf(stderr, "kretro: unknown option %s\n", s.c_str());
       return 2;
@@ -103,10 +101,6 @@ int cmd_install(const rt::Env& e, std::vector<std::string>& a) {
   std::printf("  %s in %zu files, packed to %s\n", fmt::bytes_iec(r.tree_bytes).c_str(), r.entries,
               fmt::bytes_iec(r.pack_bytes).c_str());
   std::printf("  root %s\n", to_hex(r.root).c_str());
-  if (!opt.embed_discs) {
-    std::printf("  without its disc: playing needs the original in %s\n",
-                install::iso_dir().string().c_str());
-  }
   std::printf("  kretro play %s\n", m.id.c_str());
   return 0;
 }

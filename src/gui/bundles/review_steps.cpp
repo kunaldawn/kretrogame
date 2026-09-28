@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -66,18 +67,22 @@ void Bundles::check_step() {
 void Bundles::size_step() {
   section("size");
   std::vector<const PackFacts*> packs;
+  std::map<std::string, std::string> sets;
   for (const DraftGame& g : draft_.games) {
-    if (const PackFacts* f = facts_for(g.id)) packs.push_back(f);
+    if (const PackFacts* f = facts_for(g.id)) {
+      packs.push_back(f);
+      sets[g.id] = f->set_id;
+    }
   }
   uint64_t meta = 0;
   try {
-    meta = meta_from_draft(draft_, keys_, "0000-00-00T00:00:00Z", base_licenses_).encode().size();
+    meta = meta_from_draft(draft_, keys_, "0000-00-00T00:00:00Z", base_licenses_, sets).encode().size();
   } catch (const std::exception&) {
     // A key to embed that is not there: the check step says so; the size is
     // the same to within the key's length.
     Draft d = draft_;
     for (DraftGame& g : d.games) g.embed_key = false;
-    meta = meta_from_draft(d, keys_, "", {}).encode().size();
+    meta = meta_from_draft(d, keys_, "", {}, sets).encode().size();
   }
   SizeReport r = size_report(base_bytes_, meta, packs);
   if (!base_trouble_.empty()) badge_line(BadgeKind::Warn, "The runtime's size is unknown: " + base_trouble_);
@@ -85,21 +90,15 @@ void Bundles::size_step() {
   // Each part's share of the whole as a bar, and the sizes to the right so
   // their digits line up. The size columns fit the widest figure they hold.
   const float cell = ImGui::CalcTextSize("0").x;
-  const float num_w = std::max(ImGui::CalcTextSize("without its discs").x, cell * 15);
-  // The last column says what a part would weigh without its discs. When no
-  // part carries any, every cell of it would be empty: it is left out.
-  bool discs = r.total_without_discs != r.total;
-  for (const SizePart& p : r.games) discs = discs || p.without_discs != p.bytes;
   ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(std::round(px(8)), std::round(px(5))));
   const bool table =
-      ImGui::BeginTable("size", discs ? 4 : 3,
+      ImGui::BeginTable("size", 3,
                         ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_NoSavedSettings);
   ImGui::PopStyleVar();
   if (table) {
     ImGui::TableSetupColumn("part", ImGuiTableColumnFlags_WidthStretch, 3.0f);
     ImGui::TableSetupColumn("share", ImGuiTableColumnFlags_WidthStretch, 2.0f);
     ImGui::TableSetupColumn("as it is", ImGuiTableColumnFlags_WidthFixed, cell * 10);
-    if (discs) ImGui::TableSetupColumn("without its discs", ImGuiTableColumnFlags_WidthFixed, num_w);
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     ImGui::TextDisabled("part");
@@ -107,12 +106,8 @@ void Bundles::size_step() {
     ImGui::TextDisabled("share");
     ImGui::TableSetColumnIndex(2);
     right_aligned("as it is", kDim);
-    if (discs) {
-      ImGui::TableSetColumnIndex(3);
-      right_aligned("without its discs", kDim);
-    }
     const uint64_t whole = std::max<uint64_t>(r.total, 1);
-    auto row = [&](const std::string& a, uint64_t b, uint64_t c) {
+    auto row = [&](const std::string& a, uint64_t b) {
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
       elided_text(a);
@@ -123,14 +118,10 @@ void Bundles::size_step() {
       block_progress(share < 0.01f ? 0.0f : share);
       ImGui::TableSetColumnIndex(2);
       right_aligned(human_size(b));
-      if (discs && b != c) {
-        ImGui::TableSetColumnIndex(3);
-        right_aligned("about " + human_size(c), kDim);
-      }
     };
-    row("runtime and player", r.runtime.bytes, r.runtime.bytes);
-    row("pictures and extra files", r.meta, r.meta);
-    for (const SizePart& p : r.games) row(p.label, p.bytes, p.without_discs);
+    row("runtime and player", r.runtime.bytes);
+    row("pictures and extra files", r.meta);
+    for (const SizePart& p : r.games) row(p.label, p.bytes);
     ImGui::TableNextRow(0, 0);
     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, u32(kBg2));
     ImGui::TableSetColumnIndex(0);
@@ -141,10 +132,6 @@ void Bundles::size_step() {
     elided_text("(" + std::to_string(r.total) + " bytes)", kDim);
     ImGui::TableSetColumnIndex(2);
     right_aligned(human_size(r.total), kAccent);
-    if (discs && r.total_without_discs != r.total) {
-      ImGui::TableSetColumnIndex(3);
-      right_aligned("about " + human_size(r.total_without_discs), kDim);
-    }
     ImGui::EndTable();
   }
   ImGui::Spacing();

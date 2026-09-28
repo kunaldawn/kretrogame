@@ -106,14 +106,14 @@ std::string disc_ref_for(const disc::Disc& d) {
   return archive + "#" + d.label;
 }
 
-Meta::Disc disc_entry(const disc::Disc& d, std::string ref, bool embedded) {
+Meta::Disc disc_entry(const disc::Disc& d, std::string ref) {
   Meta::Disc e;
+  e.key = disc_key(d.info.size, d.info.prefix);
   e.label = d.label;
   e.serial = d.serial;
   e.ref = std::move(ref);
   std::error_code ec;
   e.source = fs::absolute(d.source, ec).lexically_normal().string();
-  e.embedded = embedded;
   return e;
 }
 

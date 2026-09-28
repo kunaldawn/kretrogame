@@ -40,7 +40,7 @@ void SettingsPage::draw() {
     std::error_code e2;
     if (game && fs::exists(game->pack, e2)) {
       try {
-        Meta mm = Pack::open(game->pack).meta();
+        Meta mm = Pack::open(game->pack).game(game->id);
         if (mm.run.width) {
           game_w_ = mm.run.width;
           game_h_ = mm.run.height;

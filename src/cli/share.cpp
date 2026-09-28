@@ -7,6 +7,7 @@
 
 #include "handlers.h"
 #include "../install/share.h"
+#include "../pack/kgpack.h"
 #include "../rt/env.h"
 #include "../util/format.h"
 #include "../util/paths.h"
@@ -44,12 +45,18 @@ int cmd_export(const rt::Env& /*e*/, std::vector<std::string>& a) {
     std::printf("  compared with this one and the difference reported.\n");
   } else {
     fs::path src = game_pack(id);
+    if (src.empty()) { std::fprintf(stderr, "kretro: %s is not installed\n", id.c_str()); return 1; }
     fs::path dst = out.empty() ? fs::path(id + ".kgpack") : out;
     std::error_code ec;
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
     if (ec) { std::fprintf(stderr, "kretro: %s\n", ec.message().c_str()); return 1; }
-    std::printf("%s\n  %s - the whole game in one file\n", dst.c_str(),
-                fmt::bytes_iec(fs::file_size(dst)).c_str());
+    // A capsule is the game's whole set: the disc is one, whatever games came
+    // off it.
+    const size_t others = Pack::open(dst).games().size() - 1;
+    const std::string with =
+        others ? ", with the " + std::to_string(others) + " other game" + (others == 1 ? "" : "s") + " of its set" : "";
+    std::printf("%s\n  %s - the whole game in one file%s\n", dst.c_str(), fmt::bytes_iec(fs::file_size(dst)).c_str(),
+                with.c_str());
   }
   return 0;
 }

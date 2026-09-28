@@ -47,12 +47,9 @@ Meta draft_to_meta(const Draft& d, const std::vector<disc::Disc>& discs) {
   m.run.windows_version = d.windows_version;
   m.runtime.dgvoodoo = d.dgvoodoo;
   m.install.install_dir = d.install_dir.generic_string();
-  // Everything the wizard writes carries its discs and its registry, so the
-  // body has the rooted layout docs/file-format.md describes.
-  m.layout = "rooted";
 
   for (const disc::Disc& disc_ : discs) {
-    Meta::Disc e = disc_entry(disc_, disc_ref_for(disc_), d.embed_discs);
+    Meta::Disc e = disc_entry(disc_, disc_ref_for(disc_));
     m.discs.push_back(e);
     m.recipe.discs.push_back(e.ref);
     // What the disc *is*, as against what it is called. install::run has

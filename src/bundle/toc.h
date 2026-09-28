@@ -74,7 +74,7 @@ struct Entry {
   uint64_t off = 0;  // from the start of the file the table belongs to
   uint64_t len = 0;
   Hash blake3{};
-  std::string name;  // the game id for a pack; empty for everything else
+  std::string name;  // the set id for a pack; empty for everything else
   // False only for an entry read from a v2 or v3 trailer. Those slots were
   // hashed with SHA-256, to name cache directories, and the game slot not at
   // all; there is no BLAKE3 to check them against.

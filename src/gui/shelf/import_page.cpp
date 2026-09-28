@@ -36,7 +36,8 @@ void ImportPage::inspect_for_import(const fs::path& f) {
   import_.bytes = fs::file_size(f, ec);
   try {
     Pack p = Pack::open(f);
-    import_.meta = p.meta();
+    import_.meta = p.games().front();
+    for (const Meta& g : p.games()) import_.games.push_back(g.id);
     import_.has_body = p.has_body();
     import_.root = p.header().blake3_root;
     // A capsule carries its discs, so there is nothing to go looking for.
@@ -158,14 +159,16 @@ void ImportPage::draw() {
     std::string game = m.name.empty() ? m.id : m.name;
     if (m.year) game += " (" + std::to_string(m.year) + ")";
     kv("game", game);
+    // A set of several games comes in whole: every game in it is named.
+    if (in.games.size() > 1) {
+      std::string all;
+      for (const std::string& id : in.games) all += (all.empty() ? "" : ", ") + id;
+      kv("games", all, kDim);
+    }
     if (has_body) {
+      const size_t n = m.discs.size();
       std::string what = "a capsule: the game, its registry";
-      size_t embedded = 0;
-      for (const Meta::Disc& d : m.discs)
-        if (d.embedded) ++embedded;
-      what += embedded ? " and its " + std::to_string(embedded) +
-                             (embedded == 1 ? " disc" : " discs")
-                       : ", without its discs";
+      what += n ? " and its " + std::to_string(n) + (n == 1 ? " disc" : " discs") : "";
       kv("kind", what, kDim);
     } else {
       // Not "proves the result": clicking through an installer twice need not
@@ -183,10 +186,15 @@ void ImportPage::draw() {
   // up when the page comes up and when the collection is read again, rather
   // than a journal read on every frame.
   if (disk_.due(m.id + "\n" + std::to_string(ctx_.generation))) {
-    installed_ = fs::exists(game_pack(m.id), ec);
+    // A set is installed when any of its games is: importing it replaces
+    // the set they are in.
+    installed_ = false;
     played_ = 0;
-    if (installed_) {
-      for (const session::Record& r : session::journal(m.id)) played_ += static_cast<double>(r.ended - r.started);
+    for (const std::string& id : in.games) {
+      const fs::path there = game_pack(id);
+      if (there.empty() || !fs::exists(there, ec)) continue;
+      installed_ = true;
+      for (const session::Record& r : session::journal(id)) played_ += static_cast<double>(r.ended - r.started);
     }
   }
   const bool installed = installed_;

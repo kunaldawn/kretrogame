@@ -88,8 +88,11 @@ Each step prefers the cheaper way and falls back when the machine refuses it:
   finished, and is then renamed into place, so an interrupted unpack is never
   taken for a whole one.
 - **Games** follow the same rule inside the app (`session::open_layers`). A
-  game's pack body is mounted in place and a fuse-overlayfs writable layer is
-  put over it. When either cannot be done, the body is unpacked instead.
+  game's set - the pack holding it and every other game of its discs - is
+  mounted in place, and a fuse-overlayfs writable layer is put over the game's
+  own `games/<id>/game`. When either cannot be done, the set is unpacked
+  instead, once, to `set_extract_dir`, and every game of it plays from that
+  copy.
   A player does not try to mount at all when `KRETRO_MOUNT_MODE=extract`.
   kretro unpacks at once. A player's session throws `session::NeedsUnpack`,
   and the player asks before it unpacks.
@@ -111,7 +114,7 @@ on the app's behalf.
 | `KRETRO_TOC` | bootstrap: v4 files only; removed otherwise | player `main`, through `player::Bundle::open` | `<toc_off>:<toc_len>` of the table the bootstrap checked. The player refuses to start if it disagrees with its own reading. |
 | `KRETRO_RUNTIME` | bootstrap | `kg::runtime_dir`, `rt::make`, `bundle::preview_env` | The runtime root, mounted or unpacked. |
 | `KRETRO_MOUNT_MODE` | bootstrap | `gpu` capabilities (the doctor), `player::Player::no_fuse` | `fusermount` or `extract`: how the runtime got there, and so whether a game's pack can be mounted. |
-| `KRETRO_DWARFS` | bootstrap; removed when there is no tool | `kg::dwarfs_tool` (unset or empty means no tool), and through it install and the session's pack unpacking and layers; save transfer reads it directly (only unset means no tool); repack, the Bundles page's executable probe and licences, and the builder read it with `env_or_empty` and pass it on as given | The DwarFS tool, usually `/proc/self/fd/N`. Callers must pass `--tool=`. |
+| `KRETRO_DWARFS` | bootstrap; removed when there is no tool | `kg::dwarfs_tool` (unset or empty means no tool), and through it install and the session's pack unpacking and layers; save transfer reads it directly (only unset means no tool); the Bundles page's executable probe and licences, and the builder (which trims sets with it) read it with `env_or_empty` and pass it on as given | The DwarFS tool, usually `/proc/self/fd/N`. Callers must pass `--tool=`. |
 | `KRETRO_APP` | bootstrap | `session` compositor | The unpacked app, which a session runs again as the gamepad helper. |
 | `KRETRO_STATE` | bootstrap (kretro's `kretro-data` portable mode; removed for a player), `player::settle_state`, the compositor for the gamepad helper, tests | `kg::state_dir`, `player::inherited_state` | The state directory. |
 | `KRETRO_GUI` | developer | bootstrap, kretro only; always removed from the environment afterwards | Run this app instead of the embedded one. |
@@ -222,8 +225,8 @@ The programs are single-threaded except for these threads:
   log and the error are guarded by the job's mutex. `Job::locked` lets a body
   publish results under that lock.
 - **The Bundles page** has its own threads: `prober_` reads each game's
-  executable, `worker_` runs `build_from_draft`, and `repacker_` repacks one
-  pack. Each has atomics and `build_mutex_` or `probe_mutex_` for what the page
+  executable, and `worker_` runs `build_from_draft`, which trims a set to the
+  games chosen when it has to. Each has atomics and `build_mutex_` or `probe_mutex_` for what the page
   reads.
 - **The stage** (`gui::Stage`) has a capture thread that reads the installer's
   X screen into a back buffer and swaps it under a mutex. The UI thread only
@@ -292,6 +295,55 @@ The ordering constraints:
 
 The lock, the pack, the layers and the guard are locals declared in that
 order, so the mounts are closed before the lock is released.
+
+The pack is the game's set: `game_pack(id)` reads the game's one-line index,
+`<state>/games/<id>.set`, and names `<state>/packs/<set_id>.kgpack`. The game
+is `image/games/<id>/game` in it, its system files `image/games/<id>/system`,
+and its discs `image/discs/<key>`, attached in the order the game names them:
+the i-th is `D:` + i, the letters it was installed with.
+
+### Installing into a set
+
+A pack is a media set: every disc once, and every game installed from those
+discs (see [file-format.md](file-format.md#kgpack)). `install::Build::write`
+ends by deciding which set the game goes into:
+
+```
+place_game_tree  merge_registry_and_anchor  check_verify  collect_system_files
+shelf_sets  plan_merge  collect_body_discs  collect_folds
+lay_out_and_hash  pack_body  write_set
+```
+
+- `plan_merge` (`src/install/set_merge.cpp`) is pure. A shelf set is folded
+  in when it carries one of the game's discs, by key, or already holds a game
+  of that id. With none, the game gets a set of its own. The result keeps the
+  smallest set id, drops the game's earlier copy, and drops a disc no game of
+  the set uses any more, which is what a game reinstalled from other media
+  leaves behind.
+- `collect_body_discs` reads only the discs no folded set carries off their
+  images. `collect_folds` unpacks each folded set with `dwarfsextract` into the
+  build's work directory (`kg::extract_body_tree`) and hands its games and
+  discs to the new body as trees to move. Unpacking rather than mounting needs
+  no FUSE, and costs the set's unpacked size, which an install from its discs
+  needed anyway.
+- `lay_out_set_body` moves everything into `games/<id>/` and `discs/<key>/`,
+  mkdwarfs packs it, and `write_set` writes the set through `write_pack`'s own
+  temporary and rename, then each game's index, then removes the folded packs.
+  Until the rename the old set is the shelf's; an index is written only after
+  the set it names.
+
+There is no uninstall. A game, once in a set, stays there; installing it again
+replaces its tree.
+
+### Sets in a player
+
+A player carries each set once, as a kind 5 entry named by its set id, and
+`bundle.meta` says which set each game plays from. `build_from_draft` groups
+the chosen games by set: a set whose every game is chosen goes in as it is on
+the shelf, and one that is not is cut down to the chosen games and the discs
+they use (`bundle::trimmed_set`, cached under `<state>/cache/trim/`).
+`Player::verify` hashes a set once and remembers it for every game of it; a
+damaged set names the other games it takes with it.
 
 ### The panel and its units
 

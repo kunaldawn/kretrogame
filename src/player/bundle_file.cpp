@@ -57,7 +57,7 @@ Bundle Bundle::open(const fs::path& self, const std::string& toc_env) {
   // Every game bundle.meta lists has a pack, and verify_bundle proved so when
   // the file was built; a file that has lost one since is a damaged file.
   for (const bundle::GameMeta& g : b.meta.games) {
-    if (!b.toc.pack(g.id)) {
+    if (!b.toc.pack(g.set)) {
       throw std::runtime_error("This file is damaged: it names " + g.name + " and does not carry it. "
                                "Download it again.");
     }
@@ -72,7 +72,10 @@ const bundle::GameMeta* Bundle::game(const std::string& id) const {
   return nullptr;
 }
 
-const bundle::Entry* Bundle::pack(const std::string& id) const { return toc.pack(id); }
+const bundle::Entry* Bundle::pack(const std::string& id) const {
+  const bundle::GameMeta* g = game(id);
+  return g ? toc.pack(g->set) : nullptr;
+}
 
 std::string Bundle::game_list() const {
   std::string s;

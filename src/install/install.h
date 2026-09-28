@@ -19,14 +19,6 @@ namespace kg::install {
 struct Options {
   bool force = false;        // reinstall over an existing pack
   bool keep_tree = false;    // leave the extracted tree for inspection
-  // Whether the pack carries the discs it was built from. True is the honest
-  // default and what the wizard's checkbox starts on: the disc is stored once
-  // and deduplicated against the installed files, so a copy game pays almost
-  // nothing for it. A disc that is mostly *not* this game - one volume holding
-  // three of them - is the case where a caller wants it off, and then the
-  // game's page says "needs the original disc" the way it does for a disc the
-  // library cannot find.
-  bool embed_discs = true;
   // Set when rebuilding from a recipe someone shared: the tree that comes out
   // is compared against this and the difference reported. It is not a refusal -
   // a person clicking through an installer twice need not produce the same
@@ -42,6 +34,12 @@ struct Result {
   uint64_t pack_bytes = 0;
   size_t entries = 0;
   Hash root{};
+  // The set the game went into, and every game it holds now.
+  std::string set_id;
+  std::vector<std::string> set_games;
+  // Sets that were folded into it and are gone from the shelf: a game whose
+  // discs spanned two sets makes them one.
+  std::vector<std::filesystem::path> folded;
 };
 
 Result run(const rt::Env& e, Meta manifest, const Options& opt,

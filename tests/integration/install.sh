@@ -65,9 +65,11 @@ else
   exit 1
 fi
 
-PACK="$KRETRO_STATE/games/$ID.kgpack"
-[ -s "$PACK" ] && ok "the pack is where the library keeps it" \
-               || { bad "no pack at $PACK"; finish; exit 1; }
+# The shelf keeps a set per pack, and a one-line index per game naming it.
+SET="$(cat "$KRETRO_STATE/games/$ID.set" 2>/dev/null)"
+PACK="$KRETRO_STATE/packs/$SET.kgpack"
+[ -n "$SET" ] && [ -s "$PACK" ] && ok "the pack is where the library keeps it, set $SET" \
+               || { bad "no pack for $ID under $KRETRO_STATE/packs"; finish; exit 1; }
 
 # A second install must refuse rather than quietly rebuild over the first.
 if "$BIN" install "$ID" --headless >"$WORK/again.log" 2>&1; then
@@ -88,8 +90,8 @@ INFO="$WORK/info.txt"
 field() { sed -n "s/^$1  *//p" "$INFO" | head -n 1; }
 
 case "$(field layout)" in
-  rooted*) ok "the body is rooted - game/ beside discs/, not one flat tree" ;;
-  *)       bad "layout is '$(field layout)', not rooted" ;;
+  "a set"*) ok "the body is a set - games/<id>/ beside discs/<key>/" ;;
+  *)        bad "layout is '$(field layout)', not a set" ;;
 esac
 
 RECIPE="$(field recipe)"

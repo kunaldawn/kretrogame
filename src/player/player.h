@@ -124,6 +124,8 @@ class Player {
 
  private:
   std::filesystem::path unpack_pointer(const std::string& id) const;
+  // Every game that plays from the same set as `id`, `id` among them.
+  std::vector<std::string> set_games(const std::string& id) const;
   std::filesystem::path memo_file() const;
 
   Bundle b_;

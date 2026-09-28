@@ -34,7 +34,7 @@ fs::path export_saves(const std::string& id, const fs::path& out) {
   if (!r.ok()) throw std::runtime_error("could not pack the saves:\n" + r.out);
 
   fs::path dst = out.empty() ? fs::path(id + ".saves.kgpack") : out;
-  write_pack(dst, m, WriteOptions{PackKind::SaveExport, body, false});
+  write_pack(dst, set_of(m), WriteOptions{PackKind::SaveExport, body, false});
   fs::remove(body, ec);
   return dst;
 }

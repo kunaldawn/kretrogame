@@ -152,8 +152,13 @@ Pack Pack::open(const fs::path& p, uint64_t off, uint64_t len) {
   // bound then holds the decompressed side against a bomb.
   std::string meta_z = read_range(p, off + pk.header_.meta_off, pk.header_.meta_len);
   std::string meta_cbor = zstd_decompress(meta_z, kMaxMetaLen);
-  pk.meta_ = Meta::decode(meta_cbor);
+  pk.set_ = SetMeta::decode(meta_cbor);
   return pk;
+}
+
+const Meta& Pack::game(std::string_view id) const {
+  if (const Meta* m = set_.find(id)) return *m;
+  throw std::runtime_error(path_.filename().string() + " does not carry " + std::string(id));
 }
 
 void Pack::extract_body(const fs::path& out) const {
@@ -163,14 +168,14 @@ void Pack::extract_body(const fs::path& out) const {
 
 Pack::Verification Pack::verify() const {
   Verification v;
-  v.root_matches = meta_.tree.root() == header_.blake3_root;
+  v.root_matches = set_.root() == header_.blake3_root;
   if (!v.root_matches) {
     v.detail = "tree Merkle root does not match the header";
   }
 
   if (has_body()) {
     Hash actual = hash_range(path_, base_ + header_.body_off, header_.body_len);
-    v.body_matches = actual == meta_.body.blake3 && header_.body_len == meta_.body.length;
+    v.body_matches = actual == set_.body.blake3 && header_.body_len == set_.body.length;
     if (!v.body_matches) {
       if (!v.detail.empty()) v.detail += "; ";
       v.detail += "body hash does not match the metadata";

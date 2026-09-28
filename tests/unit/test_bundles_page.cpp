@@ -54,14 +54,16 @@ int main() {
   m.run.exe = "GAME.EXE";
   m.registry.fragment = "REGEDIT4\n\n[HKEY_LOCAL_MACHINE\\Software\\F]\n\"CDKey\"=\"ABCD-1234-EFGH\"\n";
   m.tree = Tree::from_directory(tmp / "tree");
-  fs::create_directories(games_dir());
-  write_pack(games_dir() / "fixture.kgpack", m, WriteOptions{PackKind::Game, tmp / "body", false});
+  ensure_state_dirs();
+  SetMeta set = set_of(m);
+  write_pack(set_pack(set.set_id), set, WriteOptions{PackKind::Game, tmp / "body", false});
+  write_game_index("fixture", set.set_id);
 
   bundle::Draft d;
   d.title = "Page smoke";
   d.id = "page-smoke";
   d.out_dir = tmp.string();
-  d.games.push_back(bundle::game_from_pack(bundle::read_pack_facts(games_dir() / "fixture.kgpack")));
+  d.games.push_back(bundle::game_from_pack(bundle::read_pack_facts(game_pack("fixture"), "fixture")));
   bundle::DraftGame gone;
   gone.id = "gone";
   gone.name = "Gone";
@@ -70,6 +72,25 @@ int main() {
   d.games.push_back(gone);
   d.last_built = (tmp / "page-smoke-1.0.run").string();
   bundle::save_draft(bundle::bundles_dir(), d);
+
+  // Two games off one disc, one pack, and a bundle of only one of them: the
+  // games step says its pack will be trimmed.
+  SetMeta shared;
+  shared.set_id = "s-00000000000000aa";
+  for (const char* id : {"fixture-a", "fixture-b"}) {
+    Meta g = m;
+    g.id = id;
+    g.name = std::string("Fixture ") + id;
+    shared.games.push_back(g);
+  }
+  write_pack(set_pack(shared.set_id), shared, WriteOptions{PackKind::Game, tmp / "body", false});
+  for (const Meta& g : shared.games) write_game_index(g.id, shared.set_id);
+  bundle::Draft part;
+  part.title = "Part of a set";
+  part.id = "page-sets";
+  part.out_dir = tmp.string();
+  part.games.push_back(bundle::game_from_pack(bundle::read_pack_facts(game_pack("fixture-a"), "fixture-a")));
+  bundle::save_draft(bundle::bundles_dir(), part);
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
@@ -113,6 +134,17 @@ int main() {
     while (page.back()) frame();
     frame();
     gui::set_ui_scale(1.0f);
+    // One game of a set of two: its pack is to be trimmed, and says so.
+    if (page.open_bundle("page-sets", S::Games)) {
+      for (int i = 0; i < 4; ++i) frame();
+      page.open_bundle("page-sets", S::Size);
+      for (int i = 0; i < 4; ++i) frame();
+    } else {
+      std::fprintf(stderr, "  FAIL the bundle of part of a set did not open\n");
+      return 1;
+    }
+    while (page.back()) frame();
+    frame();
   }
 
   // The scale's arithmetic, which no window is needed for.

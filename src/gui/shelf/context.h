@@ -65,8 +65,8 @@ struct ShelfContext {
 
   // The collection again, from disk, keeping the selection in range.
   void reload();
-  // Counts the reloads: a session played, a game built, imported or
-  // uninstalled all end in one, so a page keeping a copy of something else
+  // Counts the reloads: a session played, a game built or imported all end in
+  // one, so a page keeping a copy of something else
   // it read from disk reads it again when this changes.
   unsigned generation = 0;
   // Where `id` is in entries, or 0 when it is not there.

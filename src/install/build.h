@@ -35,6 +35,7 @@
 #include "body.h"
 #include "draft.h"
 #include "install.h"
+#include "set_merge.h"
 #include "source.h"
 #include "survey.h"
 
@@ -171,15 +172,14 @@ class Build {
   const std::vector<Candidate>& candidates() const;
 
   Result write(const Draft& d);
-  // Lays the body out rooted - game/, system/, discs/<n>/, registry.reg - hashes
-  // game/, packs the lot and writes the .kgpack. Both paths end here, so both
-  // produce the rooted layout docs/file-format.md describes and neither can
-  // drift from the other.
+  // Lays the body out as a set - games/<id>/, discs/<key>/ - hashes the game's
+  // tree, packs the lot and writes the .kgpack. Both paths end here, so both
+  // produce the layout docs/file-format.md describes and neither can drift from
+  // the other.
   //
-  // discs/ is there when every Meta::Disc says embedded and absent when any
-  // says otherwise; system/ is there whenever the installer wrote outside the
-  // game directory, and is not the discs' to leave out - the registry fragment
-  // names those files and the fragment travels whatever the checkbox says.
+  // Every disc Meta::discs names is in discs/; system/ is there whenever the
+  // installer wrote outside the game directory - the registry fragment names
+  // those files and the fragment travels.
   //
   // The manifest path already has a Meta - fingerprints, input bindings,
   // winetricks - that a Draft cannot carry. It compiles its own and hands it
@@ -207,12 +207,15 @@ class Build {
   void place_game_tree(const Meta& m);
   void merge_registry_and_anchor(Meta& m) const;
   void check_verify(const Meta& m) const;
-  std::vector<BodyDisc> collect_body_discs(const Meta& m);
+  std::vector<BodyDisc> collect_body_discs(const Meta& m, const std::vector<std::string>& only);
   std::filesystem::path collect_system_files(Meta& m);
-  std::filesystem::path lay_out_and_hash(Meta& m, const std::vector<BodyDisc>& body_discs,
-                                         const std::filesystem::path& system_dir);
-  std::filesystem::path pack_body(Meta& m, const std::filesystem::path& stage);
-  Result write_pack(const Meta& m, const std::filesystem::path& body);
+  void collect_folds(const MergePlan& plan, const std::vector<ShelfSet>& sets, const Meta& m,
+                     std::vector<BodyGame>& games, std::vector<BodyDisc>& discs);
+  std::filesystem::path lay_out_and_hash(Meta& m, MergePlan& plan, const std::vector<BodyGame>& games,
+                                         const std::vector<BodyDisc>& discs);
+  std::filesystem::path pack_body(const std::filesystem::path& stage);
+  Result write_set(MergePlan& plan, const std::vector<ShelfSet>& sets, const Meta& m,
+                   const std::filesystem::path& body);
 
   rt::Env env_;
   std::filesystem::path work_, prefix_, home_, tree_dir_;

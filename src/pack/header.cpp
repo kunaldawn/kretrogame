@@ -62,12 +62,16 @@ Header Header::parse(std::string_view raw) {
   }
   Header h;
   h.revision = static_cast<uint8_t>(raw[7]);
-  // A range, not an equality. Every pack ever written by this program is either
-  // revision 1 (flat body) or revision 2 (rooted body), and both are readable:
-  // Meta::layout says which, and a revision 1 pack that never carried its discs
-  // is still a game that plays. Anything above 2 is a body laid out by a build
-  // that came after this one, and mounting it on a guess is how you hand a game
-  // the wrong directory.
+  // A pack from before media sets is one game with its own copy of its discs.
+  // Reading it would mean keeping a second layout alive for ever, so it is
+  // named for what it is and the game is installed again.
+  if (h.revision >= 1 && h.revision < kOldestReadableRevision) {
+    throw std::runtime_error("kgpack container revision " + std::to_string(h.revision) +
+                             " was made by an older kretro; install the game again");
+  }
+  // Anything above this build's is a body laid out by a build that came after
+  // this one, and mounting it on a guess is how you hand a game the wrong
+  // directory.
   if (h.revision < kOldestReadableRevision || h.revision > kContainerRevision) {
     throw std::runtime_error("kgpack container revision " + std::to_string(h.revision) +
                              " is not one this build understands (it reads " +

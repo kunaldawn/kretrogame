@@ -12,7 +12,7 @@
 //   <state>/prefixes/<id>/          <state>/<id>/prefix/
 //   <state>/home/<id>/              <state>/<id>/home/
 //   <state>/saves/<id>/{image,merged}   $XDG_RUNTIME_DIR/kretro/<bundle>-<key>/<id>/
-//   <state>/extracted/<id>/         $XDG_CACHE_HOME/kretro/<bundle>-<key>/<id>/
+//   <state>/extracted/<set>/        $XDG_CACHE_HOME/kretro/<bundle>-<key>/<set>/
 //
 // A player's mount points are never inside its state, because its state may be
 // beside the executable on a USB stick, and Ubuntu 25.04 confines fusermount3
@@ -27,6 +27,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace kg {
 
@@ -40,7 +41,8 @@ std::filesystem::path state_dir();
 // kretro was run outside its bootstrap, which is normal during development.
 std::filesystem::path runtime_dir();
 
-std::filesystem::path games_dir();     // <state>/games      one .kgpack each
+std::filesystem::path games_dir();     // <state>/games      one index per game
+std::filesystem::path packs_dir();     // <state>/packs      one .kgpack per set
 std::filesystem::path runtimes_dir();  // <state>/runtimes   pinned capsules
 std::filesystem::path saves_dir();     // <state>/saves      overlay uppers
 std::filesystem::path prefixes_dir();  // <state>/prefixes   Wine prefixes, disposable
@@ -48,8 +50,27 @@ std::filesystem::path home_dir();      // <state>/home       per-game HOME
 std::filesystem::path gl_dir();        // <state>/gl         host driver links
 std::filesystem::path cache_dir();     // <state>/cache
 
-// games_dir()/<id>.kgpack: where an installed game's pack is.
+// A pack holds a media set - every disc once and every game installed from
+// them - so a game is found through a one-line index naming its set:
+//
+//   <state>/games/<id>.set          "s-0123456789abcdef"
+//   <state>/packs/<set_id>.kgpack   the set
+//
+// packs_dir()/<set_id>.kgpack.
+std::filesystem::path set_pack(const std::string& set_id);
+// games_dir()/<id>.set.
+std::filesystem::path game_index(const std::string& id);
+// The set the index names, or "" when there is no index or it names something
+// that cannot be a set's name: a person can edit it, and it becomes a path.
+std::string game_set(const std::string& id);
+// The pack an installed game is in: set_pack of its index, or an empty path
+// when it has none. Whether that pack still holds the game is for whoever
+// opens it to check.
 std::filesystem::path game_pack(const std::string& id);
+// Writes the index, replacing any that was there.
+void write_game_index(const std::string& id, const std::string& set_id);
+// Every game with an index, sorted.
+std::vector<std::string> indexed_games();
 
 // Switches every game_*_dir below to a player's layout, keyed by `bundle_id`.
 // Called once, by the player, before anything else asks where a game lives.
@@ -61,7 +82,10 @@ std::filesystem::path game_saves_dir(const std::string& id);    // live/, gen/, 
 std::filesystem::path game_prefix_dir(const std::string& id);
 std::filesystem::path game_home_dir(const std::string& id);
 std::filesystem::path game_mount_dir(const std::string& id);    // image/ and merged/
-std::filesystem::path game_extract_dir(const std::string& id);  // the no-FUSE copy
+// Where a set is unpacked where it cannot be mounted: once per set, and every
+// game of it plays from that one copy, each writing under its own
+// games/<id>/game - a DVD of three games is unpacked once, not three times.
+std::filesystem::path set_extract_dir(const std::string& set_id);
 
 // The session's runtime directory: $XDG_RUNTIME_DIR, or the private
 // /tmp/.kretro-<uid> the bootstrap makes when there is none.

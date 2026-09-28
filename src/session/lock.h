@@ -41,7 +41,7 @@ class GameLock {
   void release();
 
  private:
-  friend GameLock lock_game(const std::string& id);
+  friend GameLock lock_path(const std::filesystem::path& file);
   int fd_ = -1;
   bool busy_ = false;
 };
@@ -52,5 +52,7 @@ std::filesystem::path lock_file(const std::string& id);
 
 // Takes the lock, or comes back saying who could not have it.
 GameLock lock_game(const std::string& id);
+// The same lock on any file: what a whole shelf's writers share.
+GameLock lock_path(const std::filesystem::path& file);
 
 }  // namespace kg::session

@@ -2,11 +2,15 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 
 #include "env.h"
+#include "file_io.h"
+#include "safe_names.h"
 
 namespace kg {
 namespace fs = std::filesystem;
@@ -44,7 +48,37 @@ fs::path prefixes_dir() { return state_dir() / "prefixes"; }
 fs::path home_dir() { return state_dir() / "home"; }
 fs::path gl_dir() { return state_dir() / "gl"; }
 fs::path cache_dir() { return state_dir() / "cache"; }
-fs::path game_pack(const std::string& id) { return games_dir() / (id + ".kgpack"); }
+fs::path packs_dir() { return state_dir() / "packs"; }
+fs::path set_pack(const std::string& set_id) { return packs_dir() / (set_id + ".kgpack"); }
+fs::path game_index(const std::string& id) { return games_dir() / (id + ".set"); }
+
+std::string game_set(const std::string& id) {
+  std::ifstream f(game_index(id));
+  std::string line;
+  std::getline(f, line);
+  return id_is_safe(line) ? line : std::string();
+}
+
+fs::path game_pack(const std::string& id) {
+  const std::string s = game_set(id);
+  return s.empty() ? fs::path() : set_pack(s);
+}
+
+void write_game_index(const std::string& id, const std::string& set_id) {
+  write_atomically(game_index(id), set_id + "\n");
+}
+
+std::vector<std::string> indexed_games() {
+  std::vector<std::string> out;
+  std::error_code ec;
+  for (const fs::directory_entry& de : fs::directory_iterator(games_dir(), ec)) {
+    if (de.path().extension() != ".set") continue;
+    std::string id = de.path().stem().string();
+    if (id_is_safe(id)) out.push_back(id);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
 
 void use_bundle_layout(const std::string& bundle_id) { bundle() = bundle_id; }
 bool bundle_layout() { return !bundle().empty(); }
@@ -96,12 +130,12 @@ fs::path game_mount_dir(const std::string& id) {
   // otherwise each take the other's running game for a stale mount.
   return runtime_base_dir() / "kretro" / (bundle() + "-" + state_key(state_dir())) / id;
 }
-fs::path game_extract_dir(const std::string& id) {
-  if (!bundle_layout()) return state_dir() / "extracted" / id;
+fs::path set_extract_dir(const std::string& set_id) {
+  if (!bundle_layout()) return state_dir() / "extracted" / set_id;
   // Keyed the same way. On the unpacked path the game writes into this tree
   // and what it wrote is found at exit: two states sharing one copy would
   // each file the other's saves as their own.
-  return user_cache_dir() / "kretro" / (bundle() + "-" + state_key(state_dir())) / id;
+  return user_cache_dir() / "kretro" / (bundle() + "-" + state_key(state_dir())) / set_id;
 }
 
 void ensure_state_dirs() {
@@ -114,7 +148,7 @@ void ensure_state_dirs() {
     fs::create_directories(cache_dir(), ec);
     return;
   }
-  for (const fs::path& p : {games_dir(), runtimes_dir(), saves_dir(), home_dir(),
+  for (const fs::path& p : {games_dir(), packs_dir(), runtimes_dir(), saves_dir(), home_dir(),
                             prefixes_dir(), gl_dir(), cache_dir()}) {
     fs::create_directories(p, ec);
   }

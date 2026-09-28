@@ -9,6 +9,7 @@
 #include "../util/paths.h"
 #include "../util/proc.h"
 #include "internal.h"
+#include "lock.h"
 #include "saves_layout.h"
 #include "unpack.h"
 
@@ -19,9 +20,8 @@ using detail::unmount;
 using detail::Unmount;
 using detail::wait_for;
 
-void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const Source* src) {
-  const std::string id = pack.meta().id;
-  const bool rooted = pack.meta().rooted();
+void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const std::string& id, const Source* src) {
+  const Meta& m = pack.game(id);
   ensure_state_dirs();
 
   // The writable layer and its workdir stay with the saves - fuse-overlayfs
@@ -97,11 +97,11 @@ void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const Source* sr
     l.image_mounted = r.ok() && wait_for([&] { return !fs::is_empty(l.image, ec); }, 40, 50);
   }
 
-  // The game is a directory inside the image for a rooted pack and the image
-  // itself for a flat one. Either way the overlay is built over exactly the
-  // game tree, so merged is precisely the game and upper is precisely what the
-  // game wrote - unchanged from every session before this one.
-  l.base = rooted ? l.image / "game" : l.image;
+  // The game is a directory inside the set's image. The overlay is built over
+  // exactly the game tree, so merged is precisely the game and upper is
+  // precisely what the game wrote - unchanged from every session before this
+  // one, and untouched by the other games of the set.
+  l.base = l.image / body_game_dir(id) / "game";
 
   // Why this is not going to be a mount, in a person's words, for when the
   // unpacked copy it falls back to may not be made without asking.
@@ -132,25 +132,40 @@ void open_layers(Layers& l, const rt::Env& e, const Pack& pack, const Source* sr
     unmount(l.image, Unmount::Plain);
     l.image_mounted = false;
   }
-  fs::path extracted = src && !src->extract_dir.empty() ? src->extract_dir : game_extract_dir(id);
+  // One unpacked copy per set: every game of it plays from there.
+  fs::path extracted =
+      src && !src->extract_dir.empty() ? src->extract_dir : set_extract_dir(pack.set().set_id);
   // Beside the tree, never inside it: for a flat pack the tree *is* the game
   // directory, and a stamp within it is a phantom written file in every
   // exit-time diff against meta.tree.
   fs::path stamp_file = extraction_stamp_file(extracted);
-  const std::string stamp = extraction_stamp(pack.meta(), h);
+  const std::string stamp = extraction_stamp(m, h);
   // The whole image is unpacked, discs and all, so the discs are reachable by
   // the same path as on the FUSE side. merged is the game tree and only the
   // game tree, which is what the exit-time diff against meta.tree needs: had it
   // been the image root, every session would have reported the entire disc set
   // as newly written.
-  fs::path game = rooted ? extracted / "game" : extracted;
+  fs::path game = extracted / body_game_dir(id) / "game";
 
   const bool may_unpack = !src || src->may_unpack;
   auto unpack = [&] {
     if (!may_unpack) {
-      throw NeedsUnpack(pack.meta().name + " has to be unpacked before it can be played: " + no_mount);
+      throw NeedsUnpack(m.name + " has to be unpacked before it can be played: " + no_mount);
     }
     if (tool.empty()) throw std::runtime_error("no DwarFS tool, and no extracted copy to fall back to");
+    // The copy is the whole set's, and an unpack removes it first: every other
+    // game of the set may be playing from it and writing into it. Their locks
+    // for as long as the unpack takes; this game's own is its caller's.
+    std::vector<GameLock> others;
+    for (const Meta& g : pack.games()) {
+      if (g.id == id) continue;
+      others.push_back(lock_game(g.id));
+      if (others.back().busy()) {
+        throw std::runtime_error("The game " + g.id + " shares " + m.name +
+                                 "'s unpacked copy and is playing from it, and the copy has to be unpacked again. "
+                                 "Close it first.");
+      }
+    }
     log_line("unpacking the game (once per install)");
     unpack_body(pack, extracted);
   };

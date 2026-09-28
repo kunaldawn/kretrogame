@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../../config/config.h"
+#include "../../install/set_merge.h"
 #include "../format.h"
 #include "../palette.h"
 #include "../widgets.h"
@@ -39,16 +40,13 @@ std::vector<std::string> protection_notes(const fs::path& dir) {
 }
 
 // One line of the size table: the key dim, the size flush right in a column of
-// its own, and whatever goes with it after. Only a row with a field in it is
-// `framed`, lowered to the text inside the field; the rest keep the body's
-// line, so the table reads at the rhythm of the paragraph under it.
-void size_row(const char* key, uint64_t bytes, const ImVec4& colour = kText, bool framed = false) {
+// its own, and whatever goes with it after, at the body's line, so the table
+// reads at the rhythm of the paragraph under it.
+void size_row(const char* key, uint64_t bytes, const ImVec4& colour = kText) {
   ImGui::TableNextRow();
   ImGui::TableSetColumnIndex(0);
-  if (framed) ImGui::AlignTextToFramePadding();
   ImGui::TextDisabled("%s", key);
   ImGui::TableSetColumnIndex(1);
-  if (framed) ImGui::AlignTextToFramePadding();
   const std::string s = human_size(bytes);
   const float w = ImGui::CalcTextSize(s.c_str()).x;
   const float room = ImGui::GetContentRegionAvail().x;
@@ -68,11 +66,25 @@ void Wizard::build_page() {
   trouble_banner();
 
   const install::Candidate& c = build_->candidates()[candidate_pick_];
-  uint64_t disc_bytes = 0, audio_bytes = 0;
+  const std::vector<disc::Disc>& discs = build_->discs();
+  std::string disc_set;
+  for (const disc::Disc& d : discs) disc_set += d.label + "\n";
+  if (shelf_seen_.due(draft_.id + "\n" + disc_set)) on_shelf_ = install::discs_on_shelf(discs);
+  // A disc a set on the shelf already carries is stored once, there: this
+  // game joins that set, and the disc is not counted again.
+  uint64_t disc_bytes = 0, audio_bytes = 0, shelf_bytes = 0;
+  size_t shelved = 0;
   std::error_code ec;
-  for (const disc::Disc& d : build_->discs()) {
-    disc_bytes += d.info.size;
-    for (const disc::AudioTrack& t : d.audio) audio_bytes += fs::file_size(t.file, ec);
+  for (size_t i = 0; i < discs.size(); ++i) {
+    uint64_t audio = 0;
+    for (const disc::AudioTrack& t : discs[i].audio) audio += fs::file_size(t.file, ec);
+    if (i < on_shelf_.size() && on_shelf_[i]) {
+      shelf_bytes += discs[i].info.size + audio;
+      ++shelved;
+      continue;
+    }
+    disc_bytes += discs[i].info.size;
+    audio_bytes += audio;
   }
 
   // What the installer wrote to C: that is not the game: the DLLs and the
@@ -83,14 +95,11 @@ void Wizard::build_page() {
 
   section("size");
   // Sizes in a column of their own, flush right, so they read down on their
-  // units; the discs' checkbox sits on the discs' own row.
+  // units.
   // No outer padding, so the keys start on the section rule's left edge, as
   // the paragraph under the table does.
   const ImGuiTableFlags tf = ImGuiTableFlags_SizingFixedFit;
-  uint64_t total = c.bytes + sys.bytes + (draft_.embed_discs ? disc_bytes + audio_bytes : 0);
-  // The one checkbox framed close, so its row is hardly taller than the rest.
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                      ImVec2(ImGui::GetStyle().FramePadding.x, std::round(px(2))));
+  uint64_t total = c.bytes + sys.bytes + disc_bytes + audio_bytes;
   if (ImGui::BeginTable("sizes", 3, tf)) {
     ImGui::TableSetupColumn("what");
     ImGui::TableSetupColumn("size");
@@ -98,9 +107,12 @@ void Wizard::build_page() {
     size_row("game tree", c.bytes);
     size_row("system files", sys.bytes);
     ImGui::TextDisabled("%zu outside the game folder", sys.files);
-    size_row("discs", disc_bytes, draft_.embed_discs ? kText : kDim, true);
-    ImGui::Checkbox("include the discs", &draft_.embed_discs);
-    size_row("cd audio", audio_bytes, draft_.embed_discs ? kText : kDim);
+    size_row("discs", disc_bytes);
+    size_row("cd audio", audio_bytes);
+    if (shelved) {
+      size_row("on the shelf", shelf_bytes, kDim);
+      ImGui::TextDisabled("already stored with another game");
+    }
     // A rule over the sum, drawn as a thin filled bar the width of the first
     // two columns, as the rest of the terminal draws its hairlines.
     ImGui::TableNextRow();
@@ -115,16 +127,17 @@ void Wizard::build_page() {
     size_row("before dedup", total, kAccent);
     ImGui::EndTable();
   }
-  ImGui::PopStyleVar();
   vgap(6);
   ImGui::PushTextWrapPos(prose_wrap());
   ImGui::TextWrapped(
       "The installed files are copies of files on the discs, and mkdwarfs stores a byte "
       "once, so the pack will be smaller than this - usually much smaller.");
-  if (!draft_.embed_discs) {
-    ImGui::TextDisabled(
-        "Without them, the game's page will say \"needs the original disc\", the same way "
-        "the library already says it for a disc it cannot find.");
+  if (shelved && shelved == discs.size()) {
+    ImGui::TextWrapped("Its discs are already on the shelf, so this game is added to the pack that holds them.");
+  } else if (shelved) {
+    ImGui::TextWrapped(
+        "Some of its discs are already on the shelf, so this game is added to the pack that "
+        "holds them, and the others join it there.");
   }
   ImGui::PopTextWrapPos();
 

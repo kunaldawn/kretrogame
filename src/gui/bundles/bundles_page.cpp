@@ -32,8 +32,6 @@ Bundles::~Bundles() {
   cancel_ = true;
   if (worker_.joinable()) worker_.join();
   if (prober_.joinable()) prober_.join();
-  // A repack stops at its next step and leaves the pack as it was.
-  if (repacker_.joinable()) repacker_.join();
   if (editing_ && dirty_) {
     try {
       remember();
@@ -54,7 +52,7 @@ void Bundles::open() {
   facts_.clear();
   for (const Entry& e : shelf_) {
     try {
-      facts_[e.id] = read_pack_facts(e.pack);
+      facts_[e.id] = read_pack_facts(e.pack, e.id);
     } catch (const std::exception&) {
       // The shelf already read this pack once; one it cannot read twice is
       // one it does not list, and the draft says the game is gone.
@@ -205,7 +203,6 @@ void Bundles::refresh_facts() {
 
 void Bundles::draw() {
   pump_build();
-  pump_repack();
   for (std::string& l : preview_.poll()) preview_log_.push_back(std::move(l));
   if (editing_) bundle_page();
   else list_page();

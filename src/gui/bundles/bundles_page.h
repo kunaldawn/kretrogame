@@ -157,17 +157,6 @@ class Bundles {
   std::string build_for_;  // the id of the bundle being built, whichever is open by the end
   std::string build_note_;
 
-  // "Repack for faster loading", one pack at a time, on a thread of its own:
-  // it unpacks and packs a whole game. The page reads the pack's facts again
-  // when it is done.
-  void start_repack(const std::string& id);
-  void pump_repack();
-  std::thread repacker_;
-  std::atomic<bool> repack_done_{false};
-  std::string repacking_;        // the game being repacked, while it is
-  std::string repack_error_;     // under build_mutex_, as the build's are
-  std::string repack_note_;
-
   // The preview.
   bundle::Preview preview_;
   std::vector<std::string> preview_log_;

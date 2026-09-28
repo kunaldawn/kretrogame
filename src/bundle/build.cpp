@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #include "../pack/kgpack.h"
@@ -164,10 +165,22 @@ void check_base(const Toc& t, const std::string& what) {
   }
 }
 
-// What a person is told was damaged: the game by its id, the rest by what it is.
-std::string entry_words(const Entry& e) {
+// "set s-0123... (game-a, game-b)": a set by its name, and the games bundle.meta
+// says are in it, when there is a bundle.meta to say so.
+std::string set_words(const std::string& set, const std::map<std::string, std::vector<std::string>>& games_of) {
+  std::string s = "set " + set;
+  auto it = games_of.find(set);
+  if (it == games_of.end() || it->second.empty()) return s;
+  s += " (";
+  for (size_t i = 0; i < it->second.size(); ++i) s += (i ? ", " : "") + it->second[i];
+  return s + ")";
+}
+
+// What a person is told was damaged: a set by its name and its games, the
+// rest by what it is.
+std::string entry_words(const Entry& e, const std::map<std::string, std::vector<std::string>>& games_of) {
   switch (e.kind) {
-    case Kind::Pack: return "game " + e.name;
+    case Kind::Pack: return set_words(e.name, games_of);
     case Kind::Tools: return "the dwarfs tool";
     case Kind::Meta: return "bundle.meta";
     default: return "the " + kind_name(e.kind);
@@ -184,25 +197,45 @@ Verified verify_with(const fs::path& p, Meter& m) {
   // kretro carries a player base; a player built from one does not.
   if (t.find(Kind::PlayerBase)) fail(p.string() + " carries a player base, which a player does not");
 
+  // Which games bundle.meta says each set holds, read first so that damage
+  // to a set can name the games it takes with it. A bundle.meta that does not
+  // decode is left for its own check below, which says it is damaged.
+  std::map<std::string, std::vector<std::string>> games_of;
+  if (const Entry* me = t.find(Kind::Meta); me && me->len <= kMaxMetaBytes) {
+    try {
+      // Its own quiet meter: this read is not part of the progress promised,
+      // which counts bundle.meta once, where its hash is checked.
+      Callbacks none;
+      Meter quiet{none, "reading", 0, 0};
+      std::string raw;
+      stream(p, t.at(*me), me->len, quiet, [&](const char* d, size_t n, uint64_t) { raw.append(d, n); });
+      for (const GameMeta& g : BundleMeta::decode(raw).games) games_of[g.set].push_back(g.id);
+    } catch (const std::exception&) {
+    }
+  }
+
   std::string meta_bytes;
+  std::map<std::string, std::vector<std::string>> carried;  // set -> the games its pack holds
   for (const Entry& e : t.entries) {
     Hasher whole;
     if (e.kind == Kind::Pack) {
+      const std::string what = set_words(e.name, games_of);
       // Opened out of the player at its own offset, so the pack is judged by
       // the bytes the player carries and not by the file it was copied from.
       std::optional<Pack> pk;
       try {
         pk = Pack::open(p, t.at(e), e.len);
       } catch (const std::exception& ex) {
-        fail("game " + e.name + " is damaged inside this file: " + ex.what());
+        fail(what + " is damaged inside this file: " + ex.what());
       }
-      if (pk->meta().id != e.name) {
-        fail("the table says game " + e.name + ", but the pack there is game " + pk->meta().id);
+      if (pk->set().set_id != e.name) {
+        fail("the table says set " + e.name + ", but the pack there is set " + pk->set().set_id);
       }
-      if (!pk->has_body()) fail("game " + e.name + " is a recipe: it carries no game to play");
-      if (pk->meta().tree.root() != pk->header().blake3_root) {
-        fail("game " + e.name + " is damaged inside this file: its Merkle root does not match its tree");
+      if (!pk->has_body()) fail(what + " is a recipe: it carries no game to play");
+      if (pk->set().root() != pk->header().blake3_root) {
+        fail(what + " is damaged inside this file: its Merkle root does not match its tree");
       }
+      for (const Meta& g : pk->games()) carried[e.name].push_back(g.id);
       // The body is hashed in the same pass as the whole entry: the pack is
       // read once, however large it is.
       Hasher body;
@@ -212,8 +245,8 @@ Verified verify_with(const fs::path& p, Meter& m) {
         uint64_t lo = std::max(at, b0), hi = std::min(at + n, b1);
         if (lo < hi) body.update(d + (lo - at), static_cast<size_t>(hi - lo));
       });
-      if (body.finish() != pk->meta().body.blake3 || pk->header().body_len != pk->meta().body.length) {
-        fail("game " + e.name + " is damaged inside this file: its body does not match its hash");
+      if (body.finish() != pk->set().body.blake3 || pk->header().body_len != pk->set().body.length) {
+        fail(what + " is damaged inside this file: its body does not match its hash");
       }
     } else if (e.kind == Kind::Meta) {
       if (e.len > kMaxMetaBytes) fail("bundle.meta is " + std::to_string(e.len) + " bytes, more than any can be");
@@ -225,17 +258,28 @@ Verified verify_with(const fs::path& p, Meter& m) {
       stream(p, t.at(e), e.len, m, [&](const char* d, size_t n, uint64_t) { whole.update(d, n); });
     }
     if (whole.finish() != e.blake3) {
-      fail(entry_words(e) + " is damaged inside this file: its bytes do not match the table");
+      fail(entry_words(e, games_of) + " is damaged inside this file: its bytes do not match the table");
     }
   }
 
+  // Every game bundle.meta lists is in the set it names, and every game a set
+  // carries is one bundle.meta lists, in that set.
   BundleMeta meta = BundleMeta::decode(meta_bytes);
   for (const GameMeta& g : meta.games) {
-    if (!t.pack(g.id)) fail("bundle.meta lists game " + g.id + ", which this file does not carry");
+    auto it = carried.find(g.set);
+    if (it == carried.end()) {
+      fail("bundle.meta lists game " + g.id + " in set " + g.set + ", which this file does not carry");
+    }
+    if (std::find(it->second.begin(), it->second.end(), g.id) == it->second.end()) {
+      fail("bundle.meta lists game " + g.id + " in set " + g.set + ", which does not hold it");
+    }
   }
-  for (const Entry* e : t.all(Kind::Pack)) {
-    bool listed = std::any_of(meta.games.begin(), meta.games.end(), [&](const GameMeta& g) { return g.id == e->name; });
-    if (!listed) fail("this file carries game " + e->name + ", which bundle.meta does not list");
+  for (const auto& [set, ids] : carried) {
+    for (const std::string& id : ids) {
+      bool listed = std::any_of(meta.games.begin(), meta.games.end(),
+                                [&](const GameMeta& g) { return g.id == id && g.set == set; });
+      if (!listed) fail("this file carries game " + id + " in set " + set + ", which bundle.meta does not list");
+    }
   }
   return Verified{std::move(t), std::move(meta)};
 }
@@ -288,20 +332,31 @@ Built build_bundle(const BaseSource& base, const BundleMeta& meta, const std::ve
   // trailer are replaced, not kept.
   uint64_t prefix = bt.payload_end();
 
-  std::vector<std::string> ids;
+  // Each pack is a set, and carries exactly the games bundle.meta says are in
+  // it: a player carries what its author chose and nothing else, and every
+  // game it offers can be played from the set it names.
+  std::vector<std::string> ids;  // the sets, in the order given
   std::vector<uint64_t> sizes;
   for (const fs::path& pp : packs) {
     Pack pk = Pack::open(pp);
     if (!pk.has_body()) fail(pp.string() + " is a recipe: it carries no game to play");
-    const std::string& id = pk.meta().id;
-    if (std::find(ids.begin(), ids.end(), id) != ids.end()) fail("game " + id + " is given twice");
-    bool listed = std::any_of(meta.games.begin(), meta.games.end(), [&](const GameMeta& g) { return g.id == id; });
-    if (!listed) fail(pp.string() + " is game " + id + ", which bundle.meta does not list");
-    ids.push_back(id);
+    const std::string& set = pk.set().set_id;
+    if (std::find(ids.begin(), ids.end(), set) != ids.end()) fail("set " + set + " is given twice");
+    for (const Meta& g : pk.games()) {
+      bool listed = std::any_of(meta.games.begin(), meta.games.end(),
+                                [&](const GameMeta& x) { return x.id == g.id && x.set == set; });
+      if (!listed) fail(pp.string() + " carries " + g.id + ", which bundle.meta does not list in set " + set);
+    }
+    for (const GameMeta& g : meta.games) {
+      if (g.set == set && !pk.set().find(g.id)) {
+        fail("bundle.meta says " + g.id + " is in set " + set + ", which does not carry it");
+      }
+    }
+    ids.push_back(set);
     sizes.push_back(size_of(pp));
   }
   for (const GameMeta& g : meta.games) {
-    if (std::find(ids.begin(), ids.end(), g.id) == ids.end()) fail("no pack was given for game " + g.id);
+    if (std::find(ids.begin(), ids.end(), g.set) == ids.end()) fail("no pack was given for set " + g.set);
   }
   // The finished player is renamed over <out>. If <out> is the base or a pack
   // it was built from, that rename replaces the author's only copy of it -

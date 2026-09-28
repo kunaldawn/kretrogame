@@ -123,7 +123,7 @@ int cmd_input(const rt::Env& /*e*/, std::vector<std::string>& a) {
     std::error_code ec;
     fs::path pk = game_pack(ia.game);
     if (fs::exists(pk, ec)) {
-      try { binds = Pack::open(pk).meta().input; } catch (const std::exception&) {}
+      try { binds = Pack::open(pk).game(ia.game).input; } catch (const std::exception&) {}
     }
   }
   return gui::run_input(ia.display, ia.pid, ia.pause, binds);
