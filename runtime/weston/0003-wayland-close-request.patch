@@ -1,0 +1,118 @@
+wayland backend: closing the window asks, rather than tears down
+
+With KRETRO_WESTON_CLOSE_FD=N (a connected socket), closing the window -
+the frame's close button, or the host's xdg_toplevel.close (Alt+F4, the
+window menu) - sends one byte on socket N and leaves the window as it
+is. kretro then asks the game to quit, as closing it on Windows would. A
+game that is killed by its screen going away never writes what it keeps
+until it exits, a player profile for one.
+
+When the socket's reader has gone, or the variable is unset, the window
+closes as upstream: the output is destroyed, and with the last one the
+compositor exits.
+
+--- a/libweston/backend-wayland/wayland.c
++++ b/libweston/backend-wayland/wayland.c
+@@ -36,6 +36,7 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <sys/mman.h>
++#include <sys/socket.h>
+ #include <linux/input.h>
+ 
+ #include <wayland-client.h>
+@@ -108,6 +109,15 @@
+ 	 * taking the lock away, lets it go again. */
+ 	bool capture_on_click;
+ 
++	/* KRETRO_WESTON_CLOSE_FD=N: closing the window - its close button,
++	 * or the host's close (Alt+F4, the window menu) - is a request, told
++	 * to whoever holds the other end of socket N as one byte, and
++	 * the window stays. kretro asks the game to quit, as closing it on
++	 * Windows would; a game killed by its screen going away never saves
++	 * what it keeps until it exits. -1 is upstream: the output goes, and
++	 * with the last one the compositor. */
++	int close_fd;
++
+ 	/* KRETRO_WESTON_GAME=WxH and KRETRO_WESTON_WINDOW_SCALE=N: the
+ 	 * output is a game's screen of that size. Fullscreen then keeps the
+ 	 * output at that size and picks the largest whole-number scale that
+@@ -1382,12 +1392,33 @@
+ 	}
+ }
+ 
++/* Passes a close on when somebody asked to hear about it. False when
++ * nobody did, or the reader has gone: then the window closes as upstream,
++ * rather than becoming one that cannot be closed at all. */
++static bool
++close_requested(struct wayland_backend *b)
++{
++	char c = 'c';
++
++	if (b->close_fd < 0)
++		return false;
++	/* A socket, so a reader that has gone is an error here and not a
++	 * SIGPIPE that takes the compositor down with the game in it. */
++	if (send(b->close_fd, &c, 1, MSG_NOSIGNAL | MSG_DONTWAIT) == 1)
++		return true;
++	b->close_fd = -1;
++	return false;
++}
++
+ static void
+ handle_xdg_toplevel_close(void *data, struct xdg_toplevel *xdg_toplevel)
+ {
+ 	struct wayland_output *output = data;
+ 	struct weston_compositor *compositor = output->base.compositor;
+ 
++	if (close_requested(output->backend))
++		return;
++
+ 	wayland_output_destroy(&output->base);
+ 
+ 	if (wl_list_empty(&compositor->output_list))
+@@ -2239,6 +2270,11 @@
+ 		}
+ 
+ 		if (frame_status(input->output->frame) & FRAME_STATUS_CLOSE) {
++			if (close_requested(input->backend)) {
++				frame_status_clear(input->output->frame,
++						   FRAME_STATUS_CLOSE);
++				return;
++			}
+ 			wayland_output_destroy(&input->output->base);
+ 			input->output = NULL;
+ 			input->keyboard_focus = NULL;
+@@ -2666,6 +2702,11 @@
+ 		frame_touch_up(output->frame, input, id);
+ 
+ 		if (frame_status(output->frame) & FRAME_STATUS_CLOSE) {
++			if (close_requested(input->backend)) {
++				frame_status_clear(output->frame,
++						   FRAME_STATUS_CLOSE);
++				return;
++			}
+ 			wayland_output_destroy(&output->base);
+ 			input->touch_focus = NULL;
+ 			input->keyboard_focus = NULL;
+@@ -3423,6 +3464,20 @@
+ 			      strcmp(getenv("KRETRO_WESTON_CAPTURE"), "1") == 0;
+ 
+ 	{
++		const char *cfd = getenv("KRETRO_WESTON_CLOSE_FD");
++		char *end = NULL;
++		long n = cfd ? strtol(cfd, &end, 10) : -1;
++
++		b->close_fd = -1;
++		if (cfd && *cfd && end && *end == '\0' && n > 2 &&
++		    n < 65536 && fcntl((int)n, F_GETFD) >= 0) {
++			b->close_fd = (int)n;
++			/* Not handed on to the clients Weston starts. */
++			fcntl(b->close_fd, F_SETFD, FD_CLOEXEC);
++		}
++	}
++
++	{
+ 		const char *game = getenv("KRETRO_WESTON_GAME");
+ 		const char *ws = getenv("KRETRO_WESTON_WINDOW_SCALE");
+ 		int gw = 0, gh = 0;

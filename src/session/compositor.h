@@ -72,6 +72,21 @@ struct CompositorOptions {
   // its edges. An installer or winecfg is a desktop program that is clicked
   // and left, so it is off unless a caller asks, and only play does.
   bool pointer_capture = false;
+  // Xwayland runs -fullscreen, so a display mode the program sets through
+  // RandR is emulated: the X screen takes that size and Xwayland scales it
+  // up to fill the nested output. A game plays its 640x480 movies and its
+  // 800x600 menus full size on a screen made for its 1024x768 game, rather
+  // than in a corner of it. Only play asks, since only a game plays without
+  // Wine's virtual desktop (which never lets a mode change reach RandR).
+  bool emulate_modes = false;
+  // The Windows image name, "game.exe", of the program to ask to quit when
+  // the window is closed. Wayland hosts only, through the patched backend
+  // (runtime/weston/): the close is a request, the program is sent WM_CLOSE
+  // (`wine taskkill /im`), and a second close ends it at once. Empty keeps
+  // the old way, which play alone changes: closing the window takes the
+  // compositor down, and the program with it, without the chance to write
+  // what a game keeps until it exits.
+  std::string close_image;
   int stop_after = 0;                     // seconds; 0 waits for the program
   // Some Windows programs are stubs: InstallShield's setup.exe extracts its
   // engine, launches it and exits within seconds. Waiting only for the process

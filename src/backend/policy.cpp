@@ -124,7 +124,23 @@ Decision choose_backend(AuthorBackend author, const pe::Imports& exe, const gpu:
     return make(Backend::CncDdraw, "The game draws 2D with DirectDraw: cnc-ddraw");
   }
   if (exe.imports("d3drm")) return wined3d("The game uses Direct3D retained mode");
+  if (draws_with_opengl(exe)) return make(Backend::NativeGL, "The game loads OpenGL itself: native");
   return wined3d("The game imports no Direct3D, DirectDraw or OpenGL");
+}
+
+bool draws_with_opengl(const pe::Imports& exe) {
+  if (!exe.ok) return false;
+  if (exe.imports("opengl32")) return true;
+  if (!exe.names_opengl) return false;
+  for (const char* d : {"d3d9", "d3d8", "d3d11", "d3d10", "d3d10_1", "dxgi", "ddraw", "d3dim",
+                        "d3dim700", "d3drm"}) {
+    if (exe.imports(d)) return false;
+  }
+  return true;
+}
+
+std::vector<std::pair<std::string, std::string>> gl_extension_cap() {
+  return {{"__GL_ExtensionStringVersion", "17700"}, {"MESA_EXTENSION_MAX_YEAR", "2003"}};
 }
 
 DisplayPath display_path(const gpu::HostCaps& caps) {

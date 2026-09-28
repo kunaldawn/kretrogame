@@ -123,12 +123,23 @@ static void test_pe_valid() {
   CHECK(!r.imports("opengl32"));
   CHECK(!r.imports("d3d"));  // a prefix is not a match
   CHECK(!r.direct3d_im);
+  CHECK(!r.names_opengl);
 
   pe::Imports r64 = pe::parse(make_pe({"opengl32.dll", "USER32.dll"}, true));
   CHECK(r64.ok);
   CHECK(r64.is64);
   CHECK(r64.imports("opengl32"));
   CHECK_EQ(r64.dlls.size(), 2u);
+  CHECK(r64.names_opengl);  // the import's own name is in the file too
+
+  // A program that loads OpenGL by hand imports none of it: the name it
+  // passes to LoadLibrary, in whatever case, is all there is.
+  std::vector<uint8_t> by_hand = make_pe({"KERNEL32.dll", "USER32.dll"});
+  std::memcpy(&by_hand[0x3c0], "OpenGL32", 8);
+  pe::Imports rh = pe::parse(by_hand);
+  CHECK(rh.ok);
+  CHECK(!rh.imports("opengl32"));
+  CHECK(rh.names_opengl);
 
   // Headers and no import directory: an executable that imports nothing.
   std::vector<uint8_t> none = make_pe({});
@@ -792,7 +803,32 @@ static pe::Imports exe(std::vector<std::string> dlls, bool d3d_im = false) {
   i.ok = true;
   i.dlls = std::move(dlls);
   i.direct3d_im = d3d_im;
+  i.names_opengl = std::find(i.dlls.begin(), i.dlls.end(), "opengl32.dll") != i.dlls.end();
   return i;
+}
+
+// A program that names opengl32 without importing it: it loads it by hand.
+static pe::Imports loads_gl(std::vector<std::string> dlls) {
+  pe::Imports i = exe(std::move(dlls));
+  i.names_opengl = true;
+  return i;
+}
+
+// Which programs are given the short extension list, and what it is.
+static void test_gl_extension_cap() {
+  CHECK(backend::draws_with_opengl(exe({"opengl32.dll", "kernel32.dll"})));
+  CHECK(backend::draws_with_opengl(exe({"opengl32.dll", "d3d9.dll"})));  // it imports it
+  CHECK(backend::draws_with_opengl(loads_gl({"kernel32.dll", "user32.dll"})));
+  CHECK(!backend::draws_with_opengl(loads_gl({"ddraw.dll", "user32.dll"})));
+  CHECK(!backend::draws_with_opengl(loads_gl({"d3d8.dll"})));
+  CHECK(!backend::draws_with_opengl(exe({"kernel32.dll", "user32.dll"})));
+  pe::Imports unreadable = loads_gl({});
+  unreadable.ok = false;
+  CHECK(!backend::draws_with_opengl(unreadable));
+
+  const auto cap = backend::gl_extension_cap();
+  CHECK_EQ(env_of(cap, "__GL_ExtensionStringVersion"), std::string("17700"));
+  CHECK_EQ(env_of(cap, "MESA_EXTENSION_MAX_YEAR"), std::string("2003"));
 }
 
 static void test_backend_table() {
@@ -844,6 +880,10 @@ static void test_backend_table() {
       // auto: OpenGL, and nothing recognisable
       {"opengl32", A, gl, caps(V14), false, Backend::NativeGL},
       {"opengl32 and ddraw", A, exe({"ddraw.dll", "opengl32.dll"}), caps(V14), false, Backend::NativeGL},
+      {"opengl32 loaded by hand", A, loads_gl({"kernel32.dll", "winmm.dll"}), caps(V14), false,
+       Backend::NativeGL},
+      {"opengl32 named, ddraw imported", A, loads_gl({"ddraw.dll", "winmm.dll"}), caps(V14), false,
+       Backend::CncDdraw},
       {"GDI only", A, plain, caps(V13), false, Backend::WineD3DVulkan},
       {"GDI only, no Vulkan", A, plain, caps(NONE), false, Backend::WineD3DGL},
       {"unreadable exe", A, unreadable, caps(V14), false, Backend::WineD3DVulkan},
@@ -1131,6 +1171,7 @@ int main() {
     test_gamescope_and_session(tmp);
     test_probe_caps(tmp);
     test_backend_table();
+    test_gl_extension_cap();
     test_settings();
     test_backend_from_fixture_pe();
     test_session_refuses_first();

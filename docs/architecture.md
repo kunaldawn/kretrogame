@@ -124,6 +124,7 @@ on the app's behalf.
 | `KRETRO_DISC_DB` | user | `disc` database | An extra known-disc list, searched first. |
 | `KRETRO_UI_SCALE` | user, screenshot tools | `gui::forced_ui_scale` (kretro and the player) | An absolute UI scale, 0.5 to 4, in place of the one worked out from the window's size and the screen's density. Ctrl +, Ctrl - and Ctrl 0 still zoom on top of it. |
 | `KRETRO_WESTON_GAME`, `KRETRO_WESTON_WINDOW_SCALE` | `session` compositor (`start_weston`), on a Wayland host | the runtime's patched Weston wayland backend | The game's screen as `WxH`, and its scale as a window. With them fullscreen is a whole-number letterbox of that screen and windowed is exactly that size; see [Fullscreen and the mouse](#fullscreen-and-the-mouse). |
+| `KRETRO_WESTON_CLOSE_FD` | `session` compositor (`start_weston`), on a Wayland host: a socket for a game session (`CompositorOptions::close_image`, set by play alone), empty for every other session | the runtime's patched Weston wayland backend | Closing the window sends a byte on this socket instead of ending Weston; the session asks the game to quit. |
 | `KRETRO_WESTON_CAPTURE` | `session` compositor: for a game session (`CompositorOptions::pointer_capture`, set by play alone) the user's value, or `1` when unset; `0` for every other session (an installer, the stage probe); user | the runtime's patched Weston wayland backend | `1`: a click locks the host pointer to the game until Ctrl+Alt. Anything else leaves the pointer free. |
 | `KRETRO_REDUCE_MOTION` | user, screenshot tools | `gui::reduce_motion` (kretro and the player) | `1` turns motion off: the page fade-in, focus glides, scrolling, the carousels' easing, dialog fades, the hero band's fade-in and its cross-fade between games snap to where they are going, and the blinking cursors are solid. |
 
@@ -262,7 +263,8 @@ refuse_fixed_backend  check_installed  take_lock  Pack::open  check_pack
 MountInterruptGuard   mount            resolve_exe  choose_backend
 make_prefix_dirs      link_install_dir build_wine_env_and_prefix  attach_discs
 map_game_drive        run_after_prefix apply_dgvoodoo  apply_graphics
-apply_renderer        geometry         compositor_options  command_line
+cap_gl_extensions     apply_renderer   geometry         leave_virtual_desktop
+compositor_options    command_line
 [dry run returns]     launch           keep_frame  record
 ```
 
@@ -338,8 +340,9 @@ Only the first display is measured.
 The game's screen is a rootful Xwayland inside a nested Weston, and on a
 Wayland host that Weston is a client of the host through its wayland backend.
 That backend is the only program in the chain that can lock the host pointer
-or make the host window fullscreen, so both are done there, in two patches to
-Weston 14.0.2's `wayland-backend.so` (`runtime/weston/*.patch`, built by
+or make the host window fullscreen, so both are done there, in patches to
+Weston 14.0.2's `wayland-backend.so` (a third makes closing the window a
+request) (`runtime/weston/*.patch`, built by
 `runtime/Dockerfile.runtime`). `start_weston` tells it about the game through
 its environment (see the table above) and always passes `--width`, `--height`
 and `--scale`, with `--fullscreen` only as the state the window starts in.
@@ -386,12 +389,55 @@ and `--scale`, with `--fullscreen` only as the state the window starts in.
   ignored; a request is only counted as unanswered when it changes the state
   the host last reported, since a host need not answer a no-op.
 
+- **Closing the window asks the game to quit.** Play sets
+  `CompositorOptions::close_image` to the game's image name, and
+  `run_in_compositor` gives Weston one end of a socketpair as
+  `KRETRO_WESTON_CLOSE_FD` (the third patch). The frame's close button or
+  the host's `xdg_toplevel.close` then sends a byte there and leaves the
+  window up. The first one makes the session run `wine taskkill /im
+  <image>`, which sends the game's windows WM_CLOSE, so a game that saves
+  as it quits (a profile, its settings) gets to; a second one runs
+  `wineserver -k`. Without the variable, or once the socket's reader has
+  gone, a close is upstream's: the output and then Weston go, and the game
+  dies with its X screen. Installers keep that.
+
 A fullscreen start keeps `window_scale` (the work-area scale) for the way
 back, while `scale` is what fullscreen will show at. Without
 `WESTON_DATA_DIR` (set by `rt::make`) Weston cannot draw its frame; the
 patched backend still toggles, as an undecorated window. An X11 host's Weston
 runs the stock x11 backend: none of this applies there, and `--fullscreen` is
 passed alone as before.
+
+### Display modes
+
+`prepare_prefix` names Wine's virtual desktop (`HKCU\Software\Wine\Explorer`
+`Desktop=kretro`, sized from the manifest), which an installer wants: its
+windows stay in one screen the stage can show. A game does not play in it.
+Wine 11 answers `ChangeDisplaySettings` inside a virtual desktop by resizing
+the desktop and never the X screen, so a game whose movies are 640x480 and
+whose menus are 800x600 was drawn in the top-left corner of the manifest's
+1024x768 screen. `leave_virtual_desktop` deletes the `Desktop` value after
+the prefix is ready, and play sets `CompositorOptions::emulate_modes`, which
+starts the nested Xwayland with `-fullscreen`. A rootful fullscreen Xwayland
+emulates RandR: a mode the game sets makes the X screen that size, and
+Xwayland scales it through `wp_viewporter` to the whole nested output, which
+Weston then scales by its whole number. The result fills the window at every
+mode the game uses; only the manifest's own size is pixel-exact. The scaling
+does not keep the aspect, so in the Native mode (a screen of the panel's
+shape) a 4:3 mode is stretched. No mode reaches the host: the X server is
+the session's own.
+
+### OpenGL games and the extension list
+
+`cap_gl_extensions` reads the game's executable (`pe::parse_file`), and when
+`backend::draws_with_opengl` says it draws with OpenGL itself (it imports
+opengl32, or its bytes name opengl32 and it imports no Direct3D or
+DirectDraw), sets `backend::gl_extension_cap()`:
+`__GL_ExtensionStringVersion=17700` and `MESA_EXTENSION_MAX_YEAR=2003`, each
+unless the person set it. id Tech 3 prints `GL_EXTENSIONS` through a fixed
+buffer on its stack, and a current driver's list overflows it a second after
+the game starts. WineD3D wants the whole list, so a Direct3D game never gets
+the cap.
 
 ### Getting the prefix ready without a display
 

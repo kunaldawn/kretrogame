@@ -1,8 +1,10 @@
 #include "compositor.h"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/file.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -140,8 +142,11 @@ SocketName claim_socket_name(const fs::path& dir, const std::string& suffix) {
 
 namespace {
 
+// `close_fd`, when not -1, is Weston's end of the socket a close of the
+// window is reported on (CompositorOptions::close_image), and is handed to it
+// open.
 Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorOptions& opt,
-                    uint32_t w, uint32_t h, uint32_t s,
+                    uint32_t w, uint32_t h, uint32_t s, int close_fd,
                     const std::function<void(const std::string&)>& say) {
   std::error_code ec;
   const fs::path& home = opt.home;
@@ -223,6 +228,8 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
     // because Weston inherits kretro's environment: an installer must not be
     // captured just because the person exported KRETRO_WESTON_CAPTURE=1.
     wenv.set("KRETRO_WESTON_CAPTURE", pointer_capture ? "1" : "0");
+    // Set either way too: a close only asks when this session can answer.
+    wenv.set("KRETRO_WESTON_CLOSE_FD", close_fd >= 0 ? std::to_string(close_fd) : "");
   }
 
   pid_t wpid = kg::fork_tied(SIGTERM);
@@ -231,6 +238,7 @@ Weston start_weston(const rt::Env& e, const rt::Env& wine_env, const CompositorO
     int fd = open(weston_log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
     setsid();
+    if (close_fd >= 0) fcntl(close_fd, F_SETFD, 0);  // made close-on-exec; this one exec keeps it
     rt::exec(wenv, weston, wargs);
   }
 
@@ -274,9 +282,13 @@ int free_x_display() {
 // takes the whole session down. Running the X server ourselves means there is
 // no X window manager in the picture at all, which is exactly right for a
 // game that owns its whole screen.
+//
+// With `fullscreen` it asks the nested shell for the whole output, and that is
+// what lets it emulate a RandR mode: a program that sets 640x480 gets an X
+// screen of 640x480, which Xwayland scales up to the output it was given.
 ScopedChild start_xwayland(const rt::Env& e, const rt::Env& wine_env, const fs::path& home,
                            const std::string& socket, const std::string& display, int dispnum,
-                           uint32_t w, uint32_t h) {
+                           uint32_t w, uint32_t h, bool fullscreen) {
   std::error_code ec;
   rt::Env xenv = wine_env;
   xenv.set("WAYLAND_DISPLAY", socket);
@@ -289,8 +301,10 @@ ScopedChild start_xwayland(const rt::Env& e, const rt::Env& wine_env, const fs::
     int fd = open((home / "xwayland.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
     setsid();
-    rt::exec(xenv, xwayland,
-             {display, "-geometry", std::to_string(w) + "x" + std::to_string(h), "-noreset"});
+    std::vector<std::string> xargs = {display, "-geometry", std::to_string(w) + "x" + std::to_string(h),
+                                      "-noreset"};
+    if (fullscreen) xargs.push_back("-fullscreen");
+    rt::exec(xenv, xwayland, xargs);
   }
   ScopedChild child(xpid, SIGTERM, false);
 
@@ -471,24 +485,41 @@ pid_t start_input_helper(const rt::Env& genv, const fs::path& home, const std::s
 }
 
 // Waits for the program and returns its wait status. With `stop_after` set it
-// is stopped once that many seconds have gone by.
-int wait_program(pid_t gpid, int stop_after) {
+// is stopped once that many seconds have gone by. `close_fd`, when not -1, is
+// where the window's close button is heard (see CompositorOptions::close_image),
+// and `on_close` is told each time, with how many closes there have been.
+int wait_program(pid_t gpid, int stop_after, int close_fd, const std::function<void(int)>& on_close) {
   int gstatus = 0;
-  if (stop_after > 0) {
-    std::time_t deadline = std::time(nullptr) + stop_after;
-    while (true) {
-      pid_t w = waitpid(gpid, &gstatus, WNOHANG);
-      if (w == gpid) break;
-      if (std::time(nullptr) >= deadline) {
-        kill(gpid, SIGCONT);  // a stopped process cannot act on SIGTERM
-        kill(gpid, SIGTERM);
-        waitpid(gpid, &gstatus, 0);
-        break;
-      }
-      usleep(100000);
-    }
-  } else {
+  if (stop_after <= 0 && close_fd < 0) {
     waitpid(gpid, &gstatus, 0);
+    return gstatus;
+  }
+  const std::time_t deadline = stop_after > 0 ? std::time(nullptr) + stop_after : 0;
+  int closes = 0;
+  while (true) {
+    pid_t w = waitpid(gpid, &gstatus, WNOHANG);
+    if (w == gpid) break;
+    if (deadline && std::time(nullptr) >= deadline) {
+      kill(gpid, SIGCONT);  // a stopped process cannot act on SIGTERM
+      kill(gpid, SIGTERM);
+      waitpid(gpid, &gstatus, 0);
+      break;
+    }
+    if (close_fd < 0) {
+      usleep(100000);
+      continue;
+    }
+    pollfd pfd{close_fd, POLLIN, 0};
+    if (poll(&pfd, 1, 100) <= 0) continue;
+    char buf[16];
+    const ssize_t n = recv(close_fd, buf, sizeof buf, MSG_DONTWAIT);
+    if (n > 0) {
+      // Clicks that came in together are one close: a second is somebody
+      // who has seen the first go unanswered.
+      on_close(++closes);
+    } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+      close_fd = -1;  // Weston has gone, and the program will follow it
+    }
   }
   return gstatus;
 }
@@ -564,11 +595,29 @@ CompositorResult run_in_compositor(const rt::Env& e, const rt::Env& wine_env,
   const uint32_t s = opt.scale ? opt.scale : 1;
 
   write_weston_ini(e, home);
-  Weston weston = start_weston(e, wine_env, opt, w, h, s, say);
+  // The socket a close of the window is heard on, when this session has a
+  // program to ask and a window to close: the patched backend is the wayland
+  // one, and headless has no window. Ours is `listen`; Weston's end is closed
+  // here once Weston has its own copy.
+  Claim listen;
+  Claim theirs;
+  if (int sv[2]; !opt.close_image.empty() && !opt.headless && env_nonempty("WAYLAND_DISPLAY") &&
+                 socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == 0) {
+    listen.fd = sv[0];
+    theirs.fd = sv[1];
+  }
+  Weston weston = start_weston(e, wine_env, opt, w, h, s, theirs.fd, say);
+  // Before anything else is started, so Weston holds the only other end and
+  // its going is an end of file here.
+  if (theirs.fd >= 0) {
+    close(theirs.fd);
+    theirs.fd = -1;
+  }
 
   const int dispnum = free_x_display();
   const std::string display = ":" + std::to_string(dispnum);
-  ScopedChild xwayland = start_xwayland(e, wine_env, home, weston.socket, display, dispnum, w, h);
+  ScopedChild xwayland =
+      start_xwayland(e, wine_env, home, weston.socket, display, dispnum, w, h, opt.emulate_modes);
   say("private display " + display);
 
   // The earliest moment anyone else may open this display, and therefore the
@@ -594,7 +643,21 @@ CompositorResult run_in_compositor(const rt::Env& e, const rt::Env& wine_env,
   const pid_t gpid = launch_program(genv, prog, args, cwd, opt, say);
   const pid_t ipid = start_input_helper(genv, home, display, gpid, opt);
 
-  const int gstatus = wait_program(gpid, opt.stop_after);
+  // The first close asks the program to quit, as closing its window on
+  // Windows would, and a game that saves as it exits gets to. The second is
+  // somebody for whom that did not work - a game that ignores WM_CLOSE, or
+  // one that has hung - and it ends everything in the prefix at once.
+  const auto on_close = [&](int closes) {
+    if (closes == 1) {
+      say("the window was closed: asking " + opt.close_image +
+          " to quit (close it again to end it at once)");
+      rt::run(genv, prog, {"taskkill", "/im", opt.close_image});
+    } else {
+      say("the window was closed again: ending " + opt.close_image);
+      kill_wineserver(e, wine_env);
+    }
+  };
+  const int gstatus = wait_program(gpid, opt.stop_after, listen.fd, on_close);
   if (ipid > 0) { kill(ipid, SIGTERM); int st; waitpid(ipid, &st, 0); }
   result.status = WIFEXITED(gstatus) ? WEXITSTATUS(gstatus) : -1;
 

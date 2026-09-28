@@ -60,6 +60,21 @@ struct Decision {
 Decision choose_backend(AuthorBackend author, const pe::Imports& exe, const gpu::HostCaps& caps,
                         bool needs_gpu);
 
+// Whether a game draws with OpenGL itself: it imports opengl32, or it names
+// opengl32 (to load it by hand) and imports no Direct3D or DirectDraw that a
+// Direct3D path might be drawing with instead.
+bool draws_with_opengl(const pe::Imports& exe);
+
+// The environment that keeps an OpenGL game of this era from overflowing on
+// the driver's extension list. id Tech 3 prints GL_EXTENSIONS through a fixed
+// buffer on its stack, and today's lists are several times what one held in
+// 1999: the game dies writing past its stack a second after it starts. Both
+// drivers can be asked for a list of the length an old game expects - NVIDIA's
+// as of its driver 177, Mesa's without extensions past 2003 - and only a game
+// that draws with OpenGL itself is asked for it, since WineD3D wants the whole
+// list. A value the person set is theirs, and is left alone by the caller.
+std::vector<std::pair<std::string, std::string>> gl_extension_cap();
+
 enum class DisplayPath {
   NestedWeston,     // our Weston and Xwayland, integer scaling everywhere
   GamescopeDirect,  // Steam Deck Game Mode: gamescope already is the compositor

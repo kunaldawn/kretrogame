@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <ctime>
 #include <functional>
 #include <optional>
@@ -16,6 +17,7 @@
 #include "../util/env.h"
 #include "../util/format.h"
 #include "../util/paths.h"
+#include "../util/pe.h"
 #include "compositor.h"
 #include "internal.h"
 #include "journal.h"
@@ -291,6 +293,23 @@ void apply_graphics(PlayState& st) {
   }
 }
 
+// A game that draws with OpenGL itself is given an extension list of the
+// length its era expects; see backend::gl_extension_cap for why. It is
+// decided here, for every caller, rather than only in the player's backend
+// plan: kretro's own play asks for no plan, and this is the difference between
+// a game that starts and one that dies a second after it does.
+void cap_gl_extensions(PlayState& st, const Layers& layers) {
+  if (!backend::draws_with_opengl(pe::parse_file(layers.merged / st.exe))) return;
+  bool capped = false;
+  for (const auto& [k, v] : backend::gl_extension_cap()) {
+    if (std::getenv(k.c_str())) continue;
+    st.we.set(k, v);
+    capped = true;
+  }
+  if (capped) st.say("OpenGL: the extension list is cut to the length a game of this age expects");
+  st.plan("opengl", capped ? "extension list cut short" : "extension list as the person set it");
+}
+
 void apply_renderer(const PlayState& st) {
   const std::string& renderer = st.req.backend.wined3d_renderer;
   if (!renderer.empty()) {
@@ -317,15 +336,29 @@ void geometry(PlayState& st) {
                              : config::for_game(config::load(config::config_file()), st.id);
   st.geo = config::compute_geometry(m.run.width, m.run.height, panel, want);
 
-  // Native asks the game itself to render at the panel's resolution, so the
-  // virtual desktop has to be re-sized after prepare_prefix set it from the
-  // manifest.
+  // Native gives the game an X screen the size of the panel, which is what it
+  // finds as the desktop's resolution.
   if (st.geo.desktop_is_panel) {
-    fs::path wine = rt::find_wine(st.e.root);
-    std::string g = std::to_string(st.geo.logical_w) + "x" + std::to_string(st.geo.logical_h);
-    rt::run(rt::offscreen(st.we), wine, {"reg", "add", "HKCU\\Software\\Wine\\Explorer\\Desktops", "/v", "kretro", "/d", g, "/f"});
-    st.say("native: the game is asked to render at " + g);
+    st.say("native: the game is asked to render at " + std::to_string(st.geo.logical_w) + "x" +
+           std::to_string(st.geo.logical_h));
   }
+}
+
+// A game plays on the X screen itself, not in Wine's virtual desktop.
+//
+// prepare_prefix names the desktop, which an installer wants: its windows
+// stay in one screen the stage can show. A game changing its display mode
+// in there is a different matter. Wine 11 answers ChangeDisplaySettings in
+// a virtual desktop by resizing the desktop, never the X screen, so a
+// 640x480 movie or an 800x600 menu was drawn in the top-left corner of a
+// 1024x768 screen, with black round it. Without the desktop the mode change
+// is a RandR one, the nested Xwayland emulates it (CompositorOptions::
+// emulate_modes), and the game fills its screen at every resolution it
+// uses. The screen is still ours, not the host's: no mode ever reaches the
+// person's desktop.
+void leave_virtual_desktop(const PlayState& st) {
+  fs::path wine = rt::find_wine(st.e.root);
+  rt::run(rt::offscreen(st.we), wine, {"reg", "delete", "HKCU\\Software\\Wine\\Explorer", "/v", "Desktop", "/f"});
 }
 
 void compositor_options(PlayState& st) {
@@ -341,6 +374,10 @@ void compositor_options(PlayState& st) {
   co.capture = st.req.record;
   co.pause_on_blur = st.m->present.pause_on_blur;
   co.pointer_capture = true;  // a game, unlike an installer, keeps the pointer
+  co.emulate_modes = true;    // see leave_virtual_desktop
+  // Closing the window asks the game to quit, so that it saves what it keeps
+  // until it exits; a second close ends it.
+  co.close_image = fs::path(st.exe).filename().string();
   co.stop_after = st.req.stop_after;
   // Xwayland answering is the game's screen being up: Weston's window is
   // mapped by then, and the game is started a moment later.
@@ -532,8 +569,10 @@ Outcome play(const rt::Env& e, const PlayRequest& req) {
   run_after_prefix(st, layers);
   apply_dgvoodoo(st, layers);
   apply_graphics(st);
+  cap_gl_extensions(st, layers);
   apply_renderer(st);
   geometry(st);
+  leave_virtual_desktop(st);
   compositor_options(st);
   command_line(st);
   if (req.dry_run) {

@@ -32,6 +32,11 @@ struct Imports {
   // the one place the difference shows.
   bool direct3d_im = false;
 
+  // Whether "opengl32" is written anywhere in it. The id Tech 3 games and
+  // their like import no OpenGL at all: they LoadLibrary it by name, so that a
+  // 3Dfx MiniGL can stand in, and the name is the only trace in the file.
+  bool names_opengl = false;
+
   bool imports(const std::string& dll) const;  // "d3d9" or "d3d9.dll", any case
 };
 

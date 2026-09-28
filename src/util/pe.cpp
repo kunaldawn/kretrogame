@@ -101,6 +101,14 @@ bool mentions_d3d_iid(const uint8_t* data, size_t size) {
   return false;
 }
 
+// "opengl32", in any case, anywhere in the file: the name a program passes to
+// LoadLibrary when it loads OpenGL itself.
+bool mentions_opengl32(const uint8_t* data, size_t size) {
+  static const char kName[] = "opengl32";
+  auto same = [](uint8_t a, char b) { return std::tolower(a) == b; };
+  return std::search(data, data + size, kName, kName + sizeof(kName) - 1, same) != data + size;
+}
+
 }  // namespace
 
 bool Imports::imports(const std::string& dll) const {
@@ -162,6 +170,7 @@ Imports parse(const uint8_t* data, size_t size) {
   // nothing, which is not an error.
   r.ok = true;
   r.direct3d_im = mentions_d3d_iid(data, size);
+  r.names_opengl = mentions_opengl32(data, size);
 
   if (opt_size < count_at + 4) return r;
   uint32_t ndirs = b.u32(opt + count_at);

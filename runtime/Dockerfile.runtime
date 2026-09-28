@@ -228,7 +228,8 @@ RUN set -eux; \
     dpkg-query -W -f='${Version}' libweston-14-0 | grep -q "^$v-"; \
     mv /usr/share/kretro/weston/wayland-backend.so \
        /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so; \
-    grep -q KRETRO_WESTON_GAME /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so
+    grep -q KRETRO_WESTON_GAME /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so; \
+    grep -q KRETRO_WESTON_CLOSE_FD /usr/lib/x86_64-linux-gnu/libweston-14/wayland-backend.so
 
 COPY assemble-runtime.sh /usr/local/bin/assemble-runtime
 COPY asound.conf /usr/share/kretro/alsa/asound.conf

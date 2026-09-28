@@ -156,6 +156,30 @@ All notable changes to kretrogame are recorded here. The format follows
 
 ### Fixed
 
+- A game that changed its display mode was drawn in the top-left corner of
+  its screen with black round it: a 640x480 movie or an 800x600 menu in a
+  game whose screen is 1024x768. Wine 11 answers a mode change in its virtual
+  desktop by resizing the desktop, never the screen. A game now plays on the
+  nested X screen itself, without the virtual desktop, and the nested
+  Xwayland runs `-fullscreen`, so a mode the game sets is emulated and scaled
+  up to fill the window at every resolution the game uses. Installers keep
+  the virtual desktop. In the Native mode, whose screen is the panel's shape,
+  a 4:3 mode is stretched to that shape.
+- Closing a game's window killed the game: Weston went, the X screen with
+  it, and the game with that, so anything it saves only as it quits (a
+  player profile, its settings) was lost. On a Wayland desktop, closing the
+  window (its close button, or the desktop's Alt+F4) now asks the game to
+  quit, as closing it on Windows would (WM_CLOSE); closing it again ends it
+  at once. The runtime's Weston is patched for this
+  (`runtime/weston/0003-wayland-close-request.patch`).
+- An OpenGL game of the id Tech 3 kind died a second after it started, with
+  nothing on screen: it prints the driver's extension list through a fixed
+  buffer on its stack, and today's list overflows it. A game that draws with
+  OpenGL itself (it imports opengl32, or loads it by name and imports no
+  Direct3D or DirectDraw) is now given a list of the length its era expects
+  (`__GL_ExtensionStringVersion=17700`, `MESA_EXTENSION_MAX_YEAR=2003`,
+  unless already set), and the player's backend table sends one that loads
+  OpenGL by hand to native OpenGL.
 - In a game running on a Wayland desktop the mouse pointer froze once a match
   started: the game warped the pointer, Xwayland then moved it by relative
   motion only, and the nested Weston passed on absolute motion alone. The
